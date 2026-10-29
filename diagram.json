@@ -50,6 +50,31 @@
       "left": -351,
       "rotate": 180,
       "attrs": { "travelLength": "30" }
+    },
+    {
+      "type": "board-mfrc522",
+      "id": "rfid1",
+      "top": 69.24,
+      "left": -396.55,
+      "rotate": 90,
+      "attrs": {}
+    },
+    { "type": "board-mfrc522", "id": "rfid2", "top": -156.25, "left": 224.24, "attrs": {} },
+    {
+      "type": "wokwi-servo",
+      "id": "servo1",
+      "top": -157.4,
+      "left": 29.8,
+      "rotate": 180,
+      "attrs": { "hornColor": "white" }
+    },
+    {
+      "type": "wokwi-servo",
+      "id": "servo2",
+      "top": 101.8,
+      "left": -248.6,
+      "rotate": 90,
+      "attrs": {}
     }
   ],
   "connections": [
@@ -69,7 +94,27 @@
     [ "pir2:OUT", "esp:14", "magenta", [ "h98.28", "v-241.58" ] ],
     [ "pot1:VCC", "esp:3V3", "red", [ "h240", "v9.6" ] ],
     [ "pot1:GND", "esp:GND.2", "black", [ "v28.8", "h542" ] ],
-    [ "esp:34", "pot1:SIG", "green", [ "h-47.85", "v-163.2" ] ]
+    [ "esp:34", "pot1:SIG", "green", [ "h-47.85", "v-163.2" ] ],
+    [ "rfid1:SDA", "esp:5", "green", [ "v0" ] ],
+    [ "esp:18", "rfid1:SCK", "green", [ "h0" ] ],
+    [ "esp:23", "rfid1:MOSI", "green", [ "h0" ] ],
+    [ "esp:19", "rfid1:MISO", "green", [ "h0" ] ],
+    [ "esp:15", "rfid1:RST", "green", [ "v0", "h-518.4" ] ],
+    [ "rfid2:SDA", "esp:4", "green", [ "h-19.2", "v268.8" ] ],
+    [ "esp:19", "rfid2:MISO", "green", [ "h19.2", "v-192" ] ],
+    [ "esp:23", "rfid2:MOSI", "green", [ "h19.2", "v-153.6" ] ],
+    [ "esp:18", "rfid2:SCK", "green", [ "h19.2", "v-230.4" ] ],
+    [ "esp:GND.2", "rfid2:GND", "black", [ "v0" ] ],
+    [ "esp:GND.3", "rfid1:GND", "black", [ "h0" ] ],
+    [ "esp:15", "rfid2:RST", "green", [ "v0", "h19.2", "v-268.8" ] ],
+    [ "esp:3V3", "rfid2:3.3V", "red", [ "h134.55", "v-96" ] ],
+    [ "esp:3V3", "rfid1:3.3V", "red", [ "h0" ] ],
+    [ "servo2:GND", "esp:GND.3", "black", [ "v0" ] ],
+    [ "servo1:GND", "esp:GND.3", "black", [ "h21", "v193" ] ],
+    [ "esp:5V", "servo2:V+", "red", [ "h0" ] ],
+    [ "esp:27", "servo2:PWM", "green", [ "h0" ] ],
+    [ "esp:33", "servo1:PWM", "green", [ "h-28.65", "v-249.6", "h124.8" ] ],
+    [ "servo1:V+", "esp:5V", "red", [ "h30.6", "v308.1" ] ]
   ],
   "dependencies": {}
 }
