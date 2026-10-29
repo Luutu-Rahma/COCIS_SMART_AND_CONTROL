@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "author": "Luutu Rahma",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 19.2, "left": 91.24, "attrs": {} },
+    {
+      "type": "wokwi-led",
+      "id": "led1",
+      "top": -10.4,
+      "left": -65.8,
+      "rotate": 90,
+      "attrs": { "color": "magenta" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led2",
+      "top": 210,
+      "left": -60.6,
+      "rotate": 90,
+      "attrs": { "color": "orange" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": 42.35,
+      "left": -96,
+      "attrs": { "value": "220" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r2",
+      "top": 253.55,
+      "left": -96,
+      "attrs": { "value": "220" }
+    },
+    { "type": "wokwi-pir-motion-sensor", "id": "pir1", "top": 90.4, "left": -112.98, "attrs": {} },
+    {
+      "type": "wokwi-pir-motion-sensor",
+      "id": "pir2",
+      "top": 280.68,
+      "left": -101.1,
+      "rotate": 270,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-slide-potentiometer",
+      "id": "pot1",
+      "top": -124.6,
+      "left": -351,
+      "rotate": 180,
+      "attrs": { "travelLength": "30" }
+    }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "r1:1", "esp:25", "green", [ "v19.2", "h96", "v67.2" ] ],
+    [ "led1:A", "r1:2", "green", [ "h-4.4", "v9.2", "h28.8" ] ],
+    [ "led1:C", "esp:GND.2", "green", [ "h-4.4", "v-19.2", "h259.2" ] ],
+    [ "led2:A", "r2:2", "magenta", [ "h2.8", "v12", "h19.2" ] ],
+    [ "pir1:VCC", "esp:3V3", "red", [ "v9.6", "h86.4", "v-144" ] ],
+    [ "pir1:GND", "esp:GND.2", "black", [ "v0", "h76.54", "v-182.4", "h172.8" ] ],
+    [ "pir1:OUT", "esp:13", "green", [ "v0" ] ],
+    [ "r2:1", "esp:26", "magenta", [ "v-48", "h163.2", "v-76.8" ] ],
+    [ "led2:C", "esp:32", "magenta", [ "h0", "v-28.4", "h115.2", "v-105.6" ] ],
+    [ "pir2:VCC", "esp:3V3", "red", [ "h79.08", "v-308.92" ] ],
+    [ "pir2:GND", "esp:GND.2", "black", [ "h79.08", "v-337.46", "h144" ] ],
+    [ "pir2:OUT", "esp:14", "magenta", [ "h98.28", "v-241.58" ] ],
+    [ "pot1:VCC", "esp:3V3", "red", [ "h240", "v9.6" ] ],
+    [ "pot1:GND", "esp:GND.2", "black", [ "v28.8", "h542" ] ],
+    [ "esp:34", "pot1:SIG", "green", [ "h-47.85", "v-163.2" ] ]
+  ],
+  "dependencies": {}
+}
