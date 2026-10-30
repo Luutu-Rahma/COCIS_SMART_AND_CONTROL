@@ -67,6 +67,7 @@ int  access_control_list_inside(char names[][AC_NAME_LEN], int max);
 
 /* ---- Admin override (Member 5 CLI: e.g. "open-door entry") --------- */
 void access_control_open_door(gate_t gate, uint32_t hold_ms);
+void access_control_set_evacuation(bool active);
 
 /* ---- Provided by Member 4 (schedule.c) ----------------------------- */
 /* Returns true if the building is open right now. A weak default that
