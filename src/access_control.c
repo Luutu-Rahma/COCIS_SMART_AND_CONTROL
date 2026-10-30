@@ -121,8 +121,10 @@ typedef struct {
 } door_t;
 static door_t s_doors[GATE_COUNT];
 
+/* NOTE: Member 2's lighting uses LEDC timer 0 + channels 0,1.
+ * Servos therefore use timer 1 + channels 2,3 so the two modules never clash. */
 static const int           s_servo_pin[GATE_COUNT] = { PIN_SERVO_ENTRY, PIN_SERVO_EXIT };
-static const ledc_channel_t s_servo_ch[GATE_COUNT] = { LEDC_CHANNEL_0, LEDC_CHANNEL_1 };
+static const ledc_channel_t s_servo_ch[GATE_COUNT] = { LEDC_CHANNEL_2, LEDC_CHANNEL_3 };
 static const int           s_cs_pin[GATE_COUNT]    = { PIN_CS_ENTRY, PIN_CS_EXIT };
 
 /* ------------------------------------------------------------------ */
@@ -362,7 +364,7 @@ static void servos_init(void)
     ledc_timer_config_t timer = {
         .speed_mode      = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_14_BIT,
-        .timer_num       = LEDC_TIMER_0,
+        .timer_num       = LEDC_TIMER_1,
         .freq_hz         = 50,
         .clk_cfg         = LEDC_AUTO_CLK,
     };
@@ -374,7 +376,7 @@ static void servos_init(void)
             .speed_mode = LEDC_LOW_SPEED_MODE,
             .channel    = s_servo_ch[g],
             .intr_type  = LEDC_INTR_DISABLE,
-            .timer_sel  = LEDC_TIMER_0,
+            .timer_sel  = LEDC_TIMER_1,
             .duty       = 0,
             .hpoint     = 0,
         };
