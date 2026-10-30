@@ -75,6 +75,12 @@
       "left": -248.6,
       "rotate": 90,
       "attrs": {}
+    },
+    { "type": "wokwi-microsd-card",
+     "id": "sd1", 
+     "top": 144.23, 
+     "left": -38.33, 
+     "attrs": {} 
     }
   ],
   "connections": [
@@ -114,7 +120,13 @@
     [ "esp:5V", "servo2:V+", "red", [ "h0" ] ],
     [ "esp:27", "servo2:PWM", "green", [ "h0" ] ],
     [ "esp:33", "servo1:PWM", "green", [ "h-28.65", "v-249.6", "h124.8" ] ],
-    [ "servo1:V+", "esp:5V", "red", [ "h30.6", "v308.1" ] ]
+    [ "servo1:V+", "esp:5V", "red", [ "h30.6", "v308.1" ] ],
+    [ "esp:3V3", "sd1:VCC", "red", [ "v-28.65", "h57.6", "v211.2" ] ],
+    [ "esp:GND.2", "sd1:GND", "black", [ "v76.8" ] ],
+    [ "esp:18", "sd1:SCK", "orange", [ "v96" ] ],
+    [ "esp:19", "sd1:DO", "blue", [ "v0" ] ],
+    [ "esp:23", "sd1:DI", "green", [ "v124.8" ] ],
+    [ "esp:2", "sd1:CS", "magenta", [ "v134.4", "h-9.6" ] ]
   ],
   "dependencies": {}
 }
