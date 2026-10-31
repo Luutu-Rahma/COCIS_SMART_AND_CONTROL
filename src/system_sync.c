@@ -10,7 +10,7 @@
 #include <sys/time.h>
 #include "driver/gpio.h"
 #include "esp_log.h"
-#include "data_storage.h"
+#include "storage_sync.h"
 #include "schedule.h"
 #include "serial_cli.h"
 
@@ -179,8 +179,7 @@ static void check_intrusion(bool seen[3], TickType_t last[3])
                 (now - last[room]) >= pdMS_TO_TICKS(INTRUSION_LOG_INTERVAL_MS)) {
                 seen[room] = true;
                 last[room] = now;
-                system_log_post(SYSLOG_INTRUSION,
-                                "Motion in room %d while building CLOSED", room);
+                schedule_check_intrusion(true);   /* Member 4's alert; it posts SYSLOG_INTRUSION */
             }
         }
     }

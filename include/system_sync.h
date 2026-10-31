@@ -42,7 +42,7 @@
 /* ---------------- Event bits ---------------- */
 #define SYS_EVT_EVACUATION   (1u << 0)  /* global emergency override active          */
 #define SYS_EVT_INTRUSION    (1u << 1)  /* motion detected while building CLOSED     */
-#define SYS_EVT_SD_READY     (1u << 2)  /* set by data_storage once the SD is mounted */
+#define SYS_EVT_SD_READY     (1u << 2)  /* set by storage_init() once the SD is mounted */
 
 /* ---------------- Shared handles (created by system_sync_init) ---------------- */
 extern EventGroupHandle_t g_system_events;
