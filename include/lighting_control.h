@@ -1,6 +1,9 @@
 #ifndef LIGHTING_CONTROL_H
 #define LIGHTING_CONTROL_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 
