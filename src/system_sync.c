@@ -54,6 +54,8 @@ const char *system_log_type_str(system_log_type_t t)
     case SYSLOG_EVACUATION_END:   return "EVACUATION_END";
     case SYSLOG_INTRUSION:        return "INTRUSION_ALERT";
     case SYSLOG_CONFIG_CHANGE:    return "CONFIG_CHANGE";
+    case SYSLOG_AUTH_FAIL:        return "AUTH_FAIL";
+    case SYSLOG_ADMIN_ACTION:     return "ADMIN_ACTION";
     default:                      return "UNKNOWN";
     }
 }
@@ -238,7 +240,7 @@ esp_err_t system_sync_start_tasks(void)
     ok &= spawn(vTaskSystemMonitor,   "monitor",  STACK_MONITOR,  PRIO_MONITOR);
     ok &= spawn(vTaskLightingControl, "lighting", STACK_LIGHTING, PRIO_LIGHTING);
     ok &= spawn(vTaskStorage,         "storage",  STACK_STORAGE,  PRIO_STORAGE);
-    ok &= spawn(vTaskCLI,             "cli",      STACK_CLI,      PRIO_CLI);
+    ok &= spawn(vTaskSerialCLI,       "cli",      STACK_CLI,      PRIO_CLI);
 
     if (!ok) return ESP_FAIL;
     ESP_LOGI(TAG, "all tasks started");

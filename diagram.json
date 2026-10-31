@@ -19,7 +19,8 @@
     { "type": "wokwi-lcd2004", "id": "lcd1", "top": -300, "left": 400, "attrs": { "pins": "i2c" } },
     { "type": "wokwi-led", "id": "led3", "top": 330, "left": 40, "rotate": 90, "attrs": { "color": "red" } },
     { "type": "wokwi-resistor", "id": "r3", "top": 373, "left": 10, "attrs": { "value": "220" } },
-    { "type": "wokwi-buzzer", "id": "buzzer1", "top": 330, "left": 140, "attrs": { "volume": "0.1" } }
+    { "type": "wokwi-buzzer", "id": "buzzer1", "top": 330, "left": 140, "attrs": { "volume": "0.1" } },
+    { "type": "wokwi-pushbutton", "id": "btn_evac", "top": 330, "left": 240, "attrs": { "color": "red" } }
   ],
   "connections": [
     [ "esp:TX", "$serialMonitor:RX", "", [] ],
@@ -68,21 +69,23 @@
 
     [ "sd1:VCC", "esp:3V3", "red", [] ],
     [ "sd1:GND", "esp:GND.2", "black", [] ],
-    [ "sd1:SCK", "esp:16", "orange", [] ],
-    [ "sd1:DO", "esp:35", "blue", [] ],
-    [ "sd1:DI", "esp:17", "green", [] ],
-    [ "sd1:CS", "esp:32", "magenta", [] ],
+    [ "sd1:SCK", "esp:18", "orange", [] ],
+    [ "sd1:DO", "esp:19", "blue", [] ],
+    [ "sd1:DI", "esp:23", "green", [] ],
+    [ "sd1:CS", "esp:2", "magenta", [] ],
 
     [ "lcd1:GND", "esp:GND.1", "black", [] ],
     [ "lcd1:VCC", "esp:5V", "red", [] ],
     [ "lcd1:SDA", "esp:21", "blue", [] ],
     [ "lcd1:SCL", "esp:22", "yellow", [] ],
 
-    [ "r3:1", "esp:2", "red", [] ],
+    [ "r3:1", "esp:16", "red", [] ],
     [ "led3:A", "r3:2", "red", [] ],
     [ "led3:C", "esp:GND.1", "black", [] ],
     [ "buzzer1:1", "esp:GND.1", "black", [] ],
-    [ "buzzer1:2", "esp:12", "orange", [] ]
+    [ "buzzer1:2", "esp:17", "orange", [] ],
+    [ "btn_evac:1.l", "esp:32", "green", [] ],
+    [ "btn_evac:2.l", "esp:GND.1", "black", [] ]
   ],
   "dependencies": {}
 }

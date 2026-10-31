@@ -31,7 +31,9 @@
 
 #include "access_control.h"   /* Member 1: headcount, open door      */
 #include "schedule.h"         /* Member 4: opening hours, clock      */
-#include "data_storage.h"     /* Member 4: SD log                    */
+#include "storage_sync.h"     /* Member 3: locked SD log access      */
+#include "system_sync.h"      /* Member 3: evacuation, system log    */
+#include "lighting_control.h" /* Member 2: room state                */
 
 static const char *TAG = "CLI";
 
@@ -70,11 +72,6 @@ static int  s_len = 0;
 static int64_t s_admin_until_us  = 0;
 static int64_t s_locked_until_us = 0;
 static int     s_failed_logins   = 0;
-
-/* Schedule hours as last set from here (schedule.c keeps its own copy
- * private, so we mirror it for display). Starts at schedule.c's default. */
-static int s_open_hour  = 7;
-static int s_close_hour = 22;
 
 /* Analytics, built by sampling the headcount */
 static int    s_last_count = 0;
@@ -256,7 +253,8 @@ static void cmd_help(void)
            "  set-schedule <open_h> <close_h>   e.g. set-schedule 7 22\n"
            "  settime HH:MM                     set the clock (no battery clock)\n"
            "  override-lights <1|2|all> <on|off|auto>\n"
-           "  open-door <entry|exit>            open a door for 3 seconds\n");
+           "  open-door <entry|exit>            open a door for 3 seconds\n"
+           "  evacuate <on|off>                 emergency: doors open, lights full\n");
 }
 
 static void cmd_status(void)
@@ -269,7 +267,9 @@ static void cmd_status(void)
     strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tm);
 
     printf("Time:       %s\n", stamp);
-    printf("Hours:      %02d:00 - %02d:00 (%s now)\n", s_open_hour, s_close_hour,
+    int open_h = 0, close_h = 0;
+    schedule_get_hours(&open_h, &close_h);
+    printf("Hours:      %02d:00 - %02d:00 (%s now)\n", open_h, close_h,
            is_access_permitted() ? "OPEN" : "CLOSED");
     printf("Headcount:  %d\n", access_control_get_headcount());
 
@@ -281,6 +281,14 @@ static void cmd_status(void)
     printf("\n");
     printf("Uptime:     %lld s\n", (long long)(esp_timer_get_time() / 1000000));
     printf("Admin:      %s\n", is_admin() ? "logged in" : "not logged in");
+    for (int room = 1; room <= 2; room++) {
+        RoomState_t st = lighting_get_room_state(room);
+        printf("Room %d:     %s, motion %s, light %u%%\n", room,
+               st == ROOM_OCCUPIED ? "OCCUPIED" : (st == ROOM_STANDBY ? "STANDBY" : "VACANT"),
+               lighting_get_motion(room) ? "yes" : "no",
+               (unsigned)lighting_get_brightness_pct(room));
+    }
+    printf("Evacuation: %s\n", system_evacuation_active() ? "ACTIVE" : "off");
 }
 
 static void cmd_analytics(void)
@@ -319,7 +327,7 @@ static void cmd_login(const char *pw)
     }
     s_failed_logins++;
     printf("Wrong password (%d/%d).\n", s_failed_logins, MAX_FAILED_LOGINS);
-    log_event_to_sd("CLI_AUTH_FAIL", "serial");   /* audit trail on the SD card */
+    system_log_post(SYSLOG_AUTH_FAIL, "Failed admin login %d/%d on serial", s_failed_logins, MAX_FAILED_LOGINS);
     if (s_failed_logins >= MAX_FAILED_LOGINS) {
         s_locked_until_us = now + LOCKOUT_US;
         s_failed_logins   = 0;
@@ -337,11 +345,6 @@ static void cmd_set_schedule(const char *a, const char *b)
         return;
     }
     schedule_set_hours(open_h, close_h);
-    s_open_hour  = open_h;
-    s_close_hour = close_h;
-    char detail[24];
-    snprintf(detail, sizeof(detail), "cli:%d-%d", open_h, close_h);
-    log_event_to_sd("SCHEDULE_CHANGED", detail);
     printf("Hours set to %02d:00 - %02d:00.\n", open_h, close_h);
 }
 
@@ -390,8 +393,17 @@ static void cmd_open_door(const char *which)
     if (which && strcasecmp(which, "entry") == 0)      access_control_open_door(GATE_ENTRY, 3000);
     else if (which && strcasecmp(which, "exit") == 0)  access_control_open_door(GATE_EXIT, 3000);
     else { printf("Usage: open-door <entry|exit>\n"); return; }
-    log_event_to_sd("ADMIN_DOOR_OPEN", which);
+    system_log_post(SYSLOG_ADMIN_ACTION, "Admin opened %s door from CLI", which);
     printf("Opening %s door.\n", which);
+}
+
+static void cmd_evacuate(const char *mode)
+{
+    if (!require_admin()) return;
+    if (mode && strcasecmp(mode, "on") == 0)       system_evacuation_set(true, "cli");
+    else if (mode && strcasecmp(mode, "off") == 0) system_evacuation_set(false, "cli");
+    else { printf("Usage: evacuate <on|off>\n"); return; }
+    printf("Evacuation %s.\n", mode);
 }
 
 /* ================================================================== */
@@ -412,7 +424,7 @@ void parse_cli_command(char *line)
 
     if      (strcasecmp(w[0], "help") == 0)            cmd_help();
     else if (strcasecmp(w[0], "status") == 0)          cmd_status();
-    else if (strcasecmp(w[0], "logs") == 0)            sd_print_log();
+    else if (strcasecmp(w[0], "logs") == 0)            storage_print_log();
     else if (strcasecmp(w[0], "analytics") == 0)       cmd_analytics();
     else if (strcasecmp(w[0], "login") == 0)           cmd_login(w[1]);
     else if (strcasecmp(w[0], "logout") == 0) { s_admin_until_us = 0; printf("Logged out.\n"); }
@@ -420,6 +432,7 @@ void parse_cli_command(char *line)
     else if (strcasecmp(w[0], "settime") == 0)         cmd_settime(w[1]);
     else if (strcasecmp(w[0], "override-lights") == 0) cmd_override_lights(w[1], w[2]);
     else if (strcasecmp(w[0], "open-door") == 0)       cmd_open_door(w[1]);
+    else if (strcasecmp(w[0], "evacuate") == 0)        cmd_evacuate(w[1]);
     else printf("Unknown command '%s'. Type help.\n", w[0]);
 }
 

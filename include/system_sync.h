@@ -59,6 +59,8 @@ typedef enum {
     SYSLOG_EVACUATION_END,
     SYSLOG_INTRUSION,
     SYSLOG_CONFIG_CHANGE,    /* e.g. schedule changed by admin */
+    SYSLOG_AUTH_FAIL,        /* failed admin login on the CLI */
+    SYSLOG_ADMIN_ACTION,     /* admin command executed (e.g. open-door) */
 } system_log_type_t;
 
 typedef struct {
