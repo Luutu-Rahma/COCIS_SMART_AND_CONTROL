@@ -113,6 +113,7 @@ static user_t s_users[] = {
 #define NUM_USERS (sizeof(s_users) / sizeof(s_users[0]))
 
 static int s_headcount = 0;
+static bool s_evacuation = false;
 
 /* --- Doors -------------------------------------------------------- */
 typedef struct {
@@ -388,6 +389,11 @@ void access_control_open_door(gate_t gate, uint32_t hold_ms)
 {
     if (gate >= GATE_COUNT) return;
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_evacuation) {
+        xSemaphoreGive(s_state_mutex);
+        ESP_LOGW(TAG, "door open request ignored during evacuation");
+        return;
+    }
     s_doors[gate].open        = true;
     s_doors[gate].close_at_us = esp_timer_get_time() + (int64_t)hold_ms * 1000;
     xSemaphoreGive(s_state_mutex);
@@ -401,7 +407,7 @@ static void doors_update(void)
     for (int g = 0; g < GATE_COUNT; g++) {
         bool close_now = false;
         xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-        if (s_doors[g].open && now >= s_doors[g].close_at_us) {
+        if (!s_evacuation && s_doors[g].open && now >= s_doors[g].close_at_us) {
             s_doors[g].open = false;
             close_now = true;
         }
@@ -493,6 +499,31 @@ static void handle_scan(gate_t g, const uint8_t uid[AC_UID_LEN])
 /* ================================================================== */
 void access_control_set_event_queue(QueueHandle_t q)   { s_event_queue = q; }
 void access_control_set_spi_mutex(SemaphoreHandle_t m) { s_spi_mutex = m; }
+
+void access_control_set_evacuation(bool active)
+{
+    bool changed;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    changed = (s_evacuation != active);
+    s_evacuation = active;
+    if (active) {
+        for (int g = 0; g < GATE_COUNT; g++) {
+            s_doors[g].open = true;
+            s_doors[g].close_at_us = INT64_MAX;
+        }
+    } else {
+        for (int g = 0; g < GATE_COUNT; g++) s_doors[g].close_at_us = 0;
+    }
+    xSemaphoreGive(s_state_mutex);
+
+    if (!changed) return;
+    if (active) {
+        for (int g = 0; g < GATE_COUNT; g++) servo_write_angle((gate_t)g, SERVO_ANGLE_OPEN);
+        ESP_LOGW(TAG, "evacuation active: both doors held open");
+    } else {
+        ESP_LOGW(TAG, "evacuation cleared: doors will close on next update");
+    }
+}
 
 int access_control_get_headcount(void)
 {

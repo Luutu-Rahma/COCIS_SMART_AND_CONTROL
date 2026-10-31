@@ -1,6 +1,9 @@
 #ifndef LIGHTING_CONTROL_H
 #define LIGHTING_CONTROL_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 
@@ -18,5 +21,9 @@ typedef enum{
 
 void lighting_control_init(void);
 void vTaskLightingControl(void *pvParameters);
+RoomState_t lighting_get_room_state(int room);
+bool lighting_get_motion(int room);
+uint8_t lighting_get_brightness_pct(int room);
+void lighting_set_evacuation(bool active);
 
-#endif 
+#endif

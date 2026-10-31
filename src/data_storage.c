@@ -20,6 +20,7 @@ static sdmmc_card_t *card;
 esp_err_t sd_init(void)
 {
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.slot = SPI3_HOST;   // Member 3: must be the same host as access_control (RC522_SPI_HOST) so RFID and SD share ONE bus
 
     spi_bus_config_t bus = {
         .mosi_io_num = PIN_MOSI,
