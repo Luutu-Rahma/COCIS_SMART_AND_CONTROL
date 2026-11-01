@@ -204,6 +204,13 @@ static void lcd_init(void)
 static void lcd_refresh(void)
 {
     if (!s_lcd_ok) return;
+    if (system_evacuation_active()) {          /* emergency screen replaces the normal one */
+        lcd_row(0, "!! EVACUATION !!");
+        lcd_row(1, "DOORS OPEN");
+        lcd_row(2, "LIGHTS FULL");
+        lcd_row(3, "LEAVE THE BUILDING");
+        return;
+    }
     char buf[32];
     lcd_row(0, "CoCIS Smart System");
     snprintf(buf, sizeof(buf), "Inside:%d  Peak:%d", s_last_count, s_peak);
@@ -485,6 +492,7 @@ void vTaskSerialCLI(void *pvParameters)
 
     int64_t next_sample_us = 0;
     int64_t next_lcd_us    = 0;
+    bool evac_prev = false;
 
     for (;;) {
         /* Wait up to 50 ms for a key, so the loop below still runs often. */
@@ -494,6 +502,18 @@ void vTaskSerialCLI(void *pvParameters)
         }
 
         int64_t now = esp_timer_get_time();
+        /* Evacuation alert: react immediately when the global flag changes */
+        bool evac = system_evacuation_active();
+        if (evac != evac_prev) {
+            evac_prev = evac;
+            printf("\n\n*** EMERGENCY: EVACUATION %s ***\n\n",
+                   evac ? "ACTIVE - doors open, lights full, leave the building"
+                        : "CLEARED - normal operation resumed");
+            lcd_refresh();                       /* show or remove the alert screen now, not up to 1 s later */
+            next_lcd_us = now + 1000000;
+            prompt();
+            if (s_len > 0) { printf("%.*s", (int)s_len, s_line); fflush(stdout); }   /* restore half-typed text */
+        }
         if (now >= next_sample_us) { sample_stats(); next_sample_us = now + 500000; }
         if (now >= next_lcd_us)    { lcd_refresh();  next_lcd_us    = now + 1000000; }
     }
