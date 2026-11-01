@@ -37,8 +37,8 @@ static const char *TAG = "ACCESS";
 #define PIN_CS_ENTRY     5
 #define PIN_CS_EXIT      4
 #define PIN_RC522_RST    15
-#define PIN_SERVO_ENTRY  27
-#define PIN_SERVO_EXIT   33
+#define PIN_SERVO_ENTRY  33
+#define PIN_SERVO_EXIT   27
 
 #define DOOR_OPEN_MS     3000           /* how long a door stays open */
 #define SAME_TAG_LOCKOUT_US (2LL * 1000000) /* ignore same tag for 2 s */
