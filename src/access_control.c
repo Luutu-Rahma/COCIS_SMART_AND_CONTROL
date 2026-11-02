@@ -23,6 +23,7 @@
 #include "driver/ledc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "schedule.h"
 #include "freertos/task.h"
 
 static const char *TAG = "ACCESS";
@@ -95,7 +96,14 @@ typedef struct {
     uint8_t     uid[AC_UID_LEN];
     const char *name;
     bool        inside;           /* anti-passback flag */
+    user_role_t role;           /*role from schedule.h*/
 } user_t;
+
+typedef struct {
+    uint8_t uid[4];
+    const char *name;
+    user_role_t role;
+} whitelist_entry_t;       //the strust name may differ
 
 /*
  * Wokwi's built-in cards (click the RFID reader -> pick a card):
@@ -105,10 +113,10 @@ typedef struct {
  * Red is deliberately left OUT so you can test "unknown tag".
  */
 static user_t s_users[] = {
-    { {0x01, 0x02, 0x03, 0x04}, "Student A",  false },   /* Blue   */
-    { {0x11, 0x22, 0x33, 0x44}, "Student B",  false },   /* Green  */
-    { {0x55, 0x66, 0x77, 0x88}, "Lecturer",   false },   /* Yellow */
-    { {0xC0, 0xFF, 0xEE, 0x99}, "Security",   false },   /* Key fob */
+    { {0x01, 0x02, 0x03, 0x04}, "Student A",  false, ROLE_STUDENT  },   /* Blue   */
+    { {0x11, 0x22, 0x33, 0x44}, "Student B",  false, ROLE_STUDENT  },   /* Green  */
+    { {0x55, 0x66, 0x77, 0x88}, "Lecturer",   false, ROLE_LECTURER },   /* Yellow */
+    { {0xC0, 0xFF, 0xEE, 0x99}, "Security",   false, ROLE_ADMIN    },   /* Key fob */
 };
 #define NUM_USERS (sizeof(s_users) / sizeof(s_users[0]))
 
@@ -449,8 +457,6 @@ static void handle_scan(gate_t g, const uint8_t uid[AC_UID_LEN])
     ev.gate      = g;
     ev.timestamp = time(NULL);
 
-    /* Ask Member 4 BEFORE taking our own mutex (avoid nested locking). */
-    bool open_hours = is_access_permitted();
 
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     int idx = find_user(uid);
@@ -458,7 +464,7 @@ static void handle_scan(gate_t g, const uint8_t uid[AC_UID_LEN])
         ev.result = ACCESS_DENIED_UNKNOWN_TAG;
     } else {
         strlcpy(ev.name, s_users[idx].name, sizeof(ev.name));
-        if (!open_hours) {
+        if (!is_access_permitted_for_role(s_users[idx].role)) {
             ev.result = ACCESS_DENIED_SCHEDULE;          /* applies to EXIT too */
         } else if (g == GATE_ENTRY && s_users[idx].inside) {
             ev.result = ACCESS_DENIED_ALREADY_INSIDE;
