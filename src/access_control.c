@@ -23,6 +23,7 @@
 #include "driver/ledc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "schedule.h"
 #include "freertos/task.h"
 
 static const char *TAG = "ACCESS";
@@ -37,8 +38,8 @@ static const char *TAG = "ACCESS";
 #define PIN_CS_ENTRY     5
 #define PIN_CS_EXIT      4
 #define PIN_RC522_RST    15
-#define PIN_SERVO_ENTRY  27
-#define PIN_SERVO_EXIT   33
+#define PIN_SERVO_ENTRY  33
+#define PIN_SERVO_EXIT   27
 
 #define DOOR_OPEN_MS     3000           /* how long a door stays open */
 #define SAME_TAG_LOCKOUT_US (2LL * 1000000) /* ignore same tag for 2 s */
@@ -95,7 +96,14 @@ typedef struct {
     uint8_t     uid[AC_UID_LEN];
     const char *name;
     bool        inside;           /* anti-passback flag */
+    user_role_t role;           /*role from schedule.h*/
 } user_t;
+
+typedef struct {
+    uint8_t uid[4];
+    const char *name;
+    user_role_t role;
+} whitelist_entry_t;       //the strust name may differ
 
 /*
  * Wokwi's built-in cards (click the RFID reader -> pick a card):
@@ -105,14 +113,15 @@ typedef struct {
  * Red is deliberately left OUT so you can test "unknown tag".
  */
 static user_t s_users[] = {
-    { {0x01, 0x02, 0x03, 0x04}, "Student A",  false },   /* Blue   */
-    { {0x11, 0x22, 0x33, 0x44}, "Student B",  false },   /* Green  */
-    { {0x55, 0x66, 0x77, 0x88}, "Lecturer",   false },   /* Yellow */
-    { {0xC0, 0xFF, 0xEE, 0x99}, "Security",   false },   /* Key fob */
+    { {0x01, 0x02, 0x03, 0x04}, "Student A",  false, ROLE_STUDENT  },   /* Blue   */
+    { {0x11, 0x22, 0x33, 0x44}, "Student B",  false, ROLE_STUDENT  },   /* Green  */
+    { {0x55, 0x66, 0x77, 0x88}, "Lecturer",   false, ROLE_LECTURER },   /* Yellow */
+    { {0xC0, 0xFF, 0xEE, 0x99}, "Security",   false, ROLE_ADMIN    },   /* Key fob */
 };
 #define NUM_USERS (sizeof(s_users) / sizeof(s_users[0]))
 
 static int s_headcount = 0;
+static bool s_evacuation = false;
 
 /* --- Doors -------------------------------------------------------- */
 typedef struct {
@@ -390,6 +399,11 @@ void access_control_open_door(gate_t gate, uint32_t hold_ms)
 {
     if (gate >= GATE_COUNT) return;
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    if (s_evacuation) {
+        xSemaphoreGive(s_state_mutex);
+        ESP_LOGW(TAG, "door open request ignored during evacuation");
+        return;
+    }
     s_doors[gate].open        = true;
     s_doors[gate].close_at_us = esp_timer_get_time() + (int64_t)hold_ms * 1000;
     xSemaphoreGive(s_state_mutex);
@@ -403,7 +417,7 @@ static void doors_update(void)
     for (int g = 0; g < GATE_COUNT; g++) {
         bool close_now = false;
         xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-        if (s_doors[g].open && now >= s_doors[g].close_at_us) {
+        if (!s_evacuation && s_doors[g].open && now >= s_doors[g].close_at_us) {
             s_doors[g].open = false;
             close_now = true;
         }
@@ -445,8 +459,6 @@ static void handle_scan(gate_t g, const uint8_t uid[AC_UID_LEN])
     ev.gate      = g;
     ev.timestamp = time(NULL);
 
-    /* Ask Member 4 BEFORE taking our own mutex (avoid nested locking). */
-    bool open_hours = is_access_permitted();
 
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     int idx = find_user(uid);
@@ -454,7 +466,7 @@ static void handle_scan(gate_t g, const uint8_t uid[AC_UID_LEN])
         ev.result = ACCESS_DENIED_UNKNOWN_TAG;
     } else {
         strlcpy(ev.name, s_users[idx].name, sizeof(ev.name));
-        if (!open_hours) {
+        if (!is_access_permitted_for_role(s_users[idx].role)) {
             ev.result = ACCESS_DENIED_SCHEDULE;          /* applies to EXIT too */
         } else if (g == GATE_ENTRY && s_users[idx].inside) {
             ev.result = ACCESS_DENIED_ALREADY_INSIDE;
@@ -495,6 +507,31 @@ static void handle_scan(gate_t g, const uint8_t uid[AC_UID_LEN])
 /* ================================================================== */
 void access_control_set_event_queue(QueueHandle_t q)   { s_event_queue = q; }
 void access_control_set_spi_mutex(SemaphoreHandle_t m) { s_spi_mutex = m; }
+
+void access_control_set_evacuation(bool active)
+{
+    bool changed;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    changed = (s_evacuation != active);
+    s_evacuation = active;
+    if (active) {
+        for (int g = 0; g < GATE_COUNT; g++) {
+            s_doors[g].open = true;
+            s_doors[g].close_at_us = INT64_MAX;
+        }
+    } else {
+        for (int g = 0; g < GATE_COUNT; g++) s_doors[g].close_at_us = 0;
+    }
+    xSemaphoreGive(s_state_mutex);
+
+    if (!changed) return;
+    if (active) {
+        for (int g = 0; g < GATE_COUNT; g++) servo_write_angle((gate_t)g, SERVO_ANGLE_OPEN);
+        ESP_LOGW(TAG, "evacuation active: both doors held open");
+    } else {
+        ESP_LOGW(TAG, "evacuation cleared: doors will close on next update");
+    }
+}
 
 int access_control_get_headcount(void)
 {
