@@ -97,13 +97,10 @@ void schedule_check_intrusion(bool motion_detected)
 {
     if (motion_detected && !is_access_permitted()) {
         printf("INTRUSION ALERT!\n");
+        system_log_post(SYSLOG_INTRUSION, "Motion detected while building CLOSED"); 
         log_event_to_sd("INTRUSION_ALERT", "PIR");
         alert_set(true);     // LED  buzzer on
     } else {
         alert_set(false);    // LED  off
-
-        // Member 3: post to the log queue; vTaskStorage is the single writer to the SD card
-        system_log_post(SYSLOG_INTRUSION, "Motion detected while building CLOSED");
-        // later: turn on the red LED / buzzer here
     }
 }
