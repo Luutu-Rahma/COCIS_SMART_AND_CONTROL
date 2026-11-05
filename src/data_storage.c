@@ -5,6 +5,7 @@
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 #include "data_storage.h"
+#include "driver/gpio.h"
 
 #define MOUNT_POINT "/sdcard"
 #define LOG_FILE    MOUNT_POINT "/access_log.txt"
@@ -15,10 +16,19 @@
 #define PIN_CS_SD 2      // my own chip select; the other pins are shared with the RFID readers
 
 static sdmmc_card_t *card;
+static void park_extra_chip_selects(void)
+{
+    const int pins[] = {0, 12};
+    for (int i = 0; i < 2; i++) {
+        gpio_set_direction(pins[i], GPIO_MODE_OUTPUT);
+        gpio_set_level(pins[i], 1);
+    }
+}
 
 // Step 1: start the SPI bus and mount the SD card as a normal folder (/sdcard)
 esp_err_t sd_init(void)
-{
+{   
+    park_extra_chip_selects();
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SPI3_HOST;   // Member 3: must be the same host as access_control (RC522_SPI_HOST) so RFID and SD share ONE bus
 
