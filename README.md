@@ -139,5 +139,6 @@ Live views: CLI `roster` and the LCD evacuation screen (inside / safe / per-room
 - Only tagged people are tracked: a visitor without a card is invisible to the roster (the room PIRs only warn "motion, nobody tagged here").
 - GPIO 0 and 12 are strapping pins. Fine in Wokwi; on real hardware keep GPIO 0 HIGH at reset and use GPIO 12 only with a module whose SDA line idles HIGH-impedance/low at boot (or move the Room 2 reader to a GPIO expander).
 - A room reader that does not answer at boot (not wired) is skipped, so the system still works with only the two main readers.
+- **ESP32 SPI limit:** one SPI host has only 3 hardware chip-select slots (ENTRY, EXIT and the SD card use them all). The two room readers therefore share ONE software-CS SPI device; the firmware pulls GPIO 0 / GPIO 12 low around each transaction (`rc522_xfer()` in `access_control.c`). Never add another device with `spics_io_num >= 0` on SPI3 or `spi_bus_add_device()` fails with `ESP_ERR_NO_MEM` and the board boot-loops.
 - Potentiometer is wired but unused.
 - Evacuation button must exist in `diagram.json` (GPIO 32 to GND); the CLI can also trigger it.
