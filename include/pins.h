@@ -16,8 +16,8 @@
 #define PIN_SD_CS            2   /* SD card chip select on the shared bus */
 
 /* Door servos (LEDC timer 0, channels 0-1) */
-#define PIN_SERVO_ENTRY     27
-#define PIN_SERVO_EXIT      33
+#define PIN_SERVO_ENTRY     33
+#define PIN_SERVO_EXIT      27
 
 /* Lecture rooms (LEDC timer 1, channels 2-3) */
 #define PIN_PIR_ROOM1       13
