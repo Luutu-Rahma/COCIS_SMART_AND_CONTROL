@@ -8,7 +8,7 @@
  *   4. Samples the headcount twice a second to build the analytics numbers.
  *   5. Shows live numbers on an optional 20x4 I2C LCD.
  *
- * Commands:  help  status  logs  analytics  login <pw>  logout
+ * Commands:  help  status  roster  logs  analytics  login <pw>  logout
  *            set-schedule <open_h> <close_h>   settime HH:MM
  *            override-lights <1|2|all> <on|off|auto>   open-door <entry|exit>
  */
@@ -205,10 +205,23 @@ static void lcd_refresh(void)
 {
     if (!s_lcd_ok) return;
     if (system_evacuation_active()) {          /* emergency screen replaces the normal one */
+        evac_report_t rep;
+        char eb[64];
+        system_evac_get_report(&rep);
         lcd_row(0, "!! EVACUATION !!");
-        lcd_row(1, "DOORS OPEN");
-        lcd_row(2, "LIGHTS FULL");
-        lcd_row(3, "LEAVE THE BUILDING");
+        snprintf(eb, sizeof(eb), "Inside:%d Safe:%d/%d", rep.people.inside, rep.people.safe, rep.people.expected);
+        lcd_row(1, eb);
+        snprintf(eb, sizeof(eb), "R1:%d R2:%d Lobby:%d", rep.people.in_room[0], rep.people.in_room[1], rep.people.in_lobby);
+        lcd_row(2, eb);
+        if (rep.all_clear) {
+            lcd_row(3, "ALL CLEAR-BLDG EMPTY");
+        } else if (rep.unregistered[0] || rep.unregistered[1]) {
+            snprintf(eb, sizeof(eb), "UNTAGGED MOTION R%d", rep.unregistered[0] ? 1 : 2);
+            lcd_row(3, eb);
+        } else {
+            snprintf(eb, sizeof(eb), "MISSING:%d SEARCH!", rep.people.missing);
+            lcd_row(3, eb);
+        }
         return;
     }
     char buf[32];
@@ -252,6 +265,7 @@ static void cmd_help(void)
     printf("Commands:\n"
            "  help                              this list\n"
            "  status                            time, hours, headcount, who is inside\n"
+           "  roster                            who is where; during evacuation: safe / missing\n"
            "  logs                              print the SD card access log\n"
            "  analytics                         peak occupancy, entries/exits, energy\n"
            "  login <password>                  become admin for 2 minutes\n"
@@ -261,7 +275,7 @@ static void cmd_help(void)
            "  settime HH:MM                     set the clock (no battery clock)\n"
            "  override-lights <1|2|all> <on|off|auto>\n"
            "  open-door <entry|exit>            open a door for 3 seconds\n"
-           "  evacuate <on|off>                 emergency: doors open, lights full\n");
+           "  evacuate <on|off>                 emergency: doors open, lights full; 'off' empties the building\n");
 }
 
 static void cmd_status(void)
@@ -280,11 +294,16 @@ static void cmd_status(void)
            is_access_permitted() ? "OPEN" : "CLOSED");
     printf("Headcount:  %d\n", access_control_get_headcount());
 
-    char names[8][AC_NAME_LEN];
-    int n = access_control_list_inside(names, 8);
+    person_status_t people[16];
+    int np = access_control_get_roster(people, 16);
+    int shown = 0;
     printf("Inside:     ");
-    if (n == 0) printf("nobody");
-    for (int i = 0; i < n; i++) printf("%s%s", names[i], i < n - 1 ? ", " : "");
+    for (int i = 0; i < np; i++) {
+        if (people[i].location == LOC_OUTSIDE) continue;
+        printf("%s%s (%s)", shown ? ", " : "", people[i].name, access_control_loc_str(people[i].location));
+        shown++;
+    }
+    if (shown == 0) printf("nobody");
     printf("\n");
     printf("Uptime:     %lld s\n", (long long)(esp_timer_get_time() / 1000000));
     printf("Admin:      %s\n", is_admin() ? "logged in" : "not logged in");
@@ -296,6 +315,45 @@ static void cmd_status(void)
                (unsigned)lighting_get_brightness_pct(room));
     }
     printf("Evacuation: %s\n", system_evacuation_active() ? "ACTIVE" : "off");
+}
+
+/* Who is where. Read-only, so no admin login needed. */
+static void cmd_roster(void)
+{
+    person_status_t p[16];
+    int n = access_control_get_roster(p, 16);
+    evac_report_t rep;
+    system_evac_get_report(&rep);
+    bool evac = system_evacuation_active();
+
+    printf("=== BUILDING ROSTER%s ===\n", evac ? " - EVACUATION ACTIVE" : "");
+    printf("Inside: %d  (lobby %d, room 1: %d, room 2: %d)\n",
+           rep.people.inside, rep.people.in_lobby, rep.people.in_room[0], rep.people.in_room[1]);
+    if (evac) {
+        printf("Safe: %d of %d   Missing / still inside: %d\n",
+               rep.people.safe, rep.people.expected, rep.people.missing);
+    }
+    printf("%-16s %-8s %-6s %s\n", "Name", "Where", "Since", evac ? "Status" : "");
+    for (int i = 0; i < n; i++) {
+        char hm[32] = "--:--";
+        if (p[i].since != 0) {
+            struct tm tm;
+            localtime_r(&p[i].since, &tm);
+            snprintf(hm, sizeof(hm), "%02d:%02d", tm.tm_hour % 100, tm.tm_min % 100);
+        }
+        const char *status = "";
+        if (evac) {
+            if (p[i].safe)          status = "SAFE (outside)";
+            else if (p[i].expected) status = "STILL INSIDE - RESCUE";
+            else                    status = "not in building";
+        }
+        printf("%-16s %-8s %-6s %s\n", p[i].name, access_control_loc_str(p[i].location), hm, status);
+    }
+    for (int i = 0; i < 2; i++) {
+        printf("Room %d PIR: %s%s\n", i + 1, rep.motion[i] ? "motion" : "quiet",
+               rep.unregistered[i] ? "  <-- NOBODY TAGGED HERE: possible untagged person!" : "");
+    }
+    if (evac && rep.all_clear) printf("ALL CLEAR: the building is empty.\n");
 }
 
 static void cmd_analytics(void)
@@ -408,9 +466,19 @@ static void cmd_evacuate(const char *mode)
 {
     if (!require_admin()) return;
     if (mode && strcasecmp(mode, "on") == 0)       system_evacuation_set(true, "cli");
-    else if (mode && strcasecmp(mode, "off") == 0) system_evacuation_set(false, "cli");
+    else if (mode && strcasecmp(mode, "off") == 0) {
+        if (system_evacuation_active()) {
+            evac_report_t rep;
+            system_evac_get_report(&rep);
+            if (rep.people.inside > 0 || rep.people.missing > 0 || !rep.all_clear)
+                printf("WARNING: %d people still inside / %d not accounted for. Clearing anyway.\n",
+                       rep.people.inside, rep.people.missing);
+        }
+        system_evacuation_set(false, "cli");
+    }
     else { printf("Usage: evacuate <on|off>\n"); return; }
     printf("Evacuation %s.\n", mode);
+    if (strcasecmp(mode, "off") == 0) printf("Building reset to EMPTY (headcount 0).\n");
 }
 
 /* ================================================================== */
@@ -431,6 +499,7 @@ void parse_cli_command(char *line)
 
     if      (strcasecmp(w[0], "help") == 0)            cmd_help();
     else if (strcasecmp(w[0], "status") == 0)          cmd_status();
+    else if (strcasecmp(w[0], "roster") == 0)          cmd_roster();
     else if (strcasecmp(w[0], "logs") == 0)            storage_print_log();
     else if (strcasecmp(w[0], "analytics") == 0)       cmd_analytics();
     else if (strcasecmp(w[0], "login") == 0)           cmd_login(w[1]);

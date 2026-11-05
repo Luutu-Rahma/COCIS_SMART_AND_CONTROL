@@ -1,6 +1,6 @@
 # CoCIS Smart Control & Monitoring System
 
-ESP32 + ESP-IDF (PlatformIO) project, simulated in Wokwi. Access control, occupancy monitoring, automatic lighting, SD logging, configurable access schedule and a serial admin CLI for the CoCIS pilot (2 lecture rooms + main entrance).
+ESP32 + ESP-IDF (PlatformIO) project, simulated in Wokwi. Access control, occupancy monitoring, **room-level location tracking + evacuation roster (who is safe / who is missing)**, automatic lighting, SD logging, configurable access schedule and a serial admin CLI for the CoCIS pilot (2 lecture rooms + main entrance).
 
 ## 1. Architecture (what changed from the original proposal)
 
@@ -35,7 +35,7 @@ Then start the Wokwi simulator from VS Code (`Wokwi: Start Simulator`). Firmware
 | Task | Prio | Stack | Period | Owner |
 |---|---|---|---|---|
 | `vTaskAccessControl` | 5 | 4096 | 100 ms poll | Member 1 |
-| `vTaskSystemMonitor` | 4 | 3072 | 50 ms | Member 3 |
+| `vTaskSystemMonitor` | 4 | 4096 | 50 ms | Member 3 |
 | `vTaskLightingControl` | 3 | 3072 | 100 ms | Member 2 |
 | `vTaskStorage` | 2 | 8192 | blocks on queues | Member 4 |
 | `vTaskCLI` | 2 | 6144 | blocks on UART | Member 5 |
@@ -52,8 +52,8 @@ Higher number = higher priority. Created only in `system_sync.c`; do not call `x
 | `g_sd_mutex` | FAT filesystem / log file |
 | `g_config_mutex` | Schedule settings, admin credentials |
 | `g_access_queue` (`access_event_t`, len 16) | access_control -> storage |
-| `g_syslog_queue` (`system_log_event_t`, len 16) | anyone (via `system_log_post()`) -> storage |
-| `g_system_events` | Bits: `SYS_EVT_EVACUATION`, `SYS_EVT_INTRUSION`, `SYS_EVT_SD_READY` |
+| `g_syslog_queue` (`system_log_event_t`, len 32) | anyone (via `system_log_post()`) -> storage |
+| `g_system_events` | Bits: `SYS_EVT_EVACUATION`, `SYS_EVT_INTRUSION`, `SYS_EVT_SD_READY`, `SYS_EVT_EVAC_ALL_CLEAR` |
 
 `vTaskStorage` is the **only** consumer of both queues = single writer to the SD card.
 Producers send with timeout 0: a full queue drops the event with a warning instead of stalling a door.
@@ -65,7 +65,8 @@ Producers send with timeout 0: a full queue drops the event with a warning inste
 | SPI3 bus: SCK / MISO / MOSI | 18 / 19 / 23 |
 | RFID reset (shared) | 15 |
 | RFID ENTRY CS / EXIT CS | 5 / 4 |
-| Door servos ENTRY / EXIT | 27 / 33 |
+| RFID ROOM 1 CS / ROOM 2 CS (new) | **0 / 12** (3V3, GND, SCK 18, MOSI 23, MISO 19, RST 15 shared with the others) |
+| Door servos ENTRY / EXIT | 33 / 27 (docs said 27 / 33 before; the code and `diagram.json` always used 33 / 27) |
 | PIR Room 1 / Room 2 | 13 / 14 |
 | LED Room 1 / Room 2 | 25 / 26 |
 | Evacuation pushbutton (to GND, internal pull-up) | 32 |
@@ -77,11 +78,19 @@ Producers send with timeout 0: a full queue drops the event with a warning inste
 
 ## 7. System behaviour
 
-**Access decision (per scan, `access_control.c`):** unknown tag -> denied; outside open hours -> denied (**entry and exit**); entry while already inside -> denied (anti-passback); exit while not inside -> denied; otherwise granted: flag + headcount updated, that gate's servo opens 3 s. Same tag on the same reader within 2 s is ignored. Card colours in Wokwi: Blue/Green/Yellow/Key fob are whitelisted, **Red is deliberately unknown**, the grey NFC tag (7-byte UID) is unsupported.
+**Access decision (per scan, `access_control.c`):** four readers: ENTRY, EXIT, ROOM1, ROOM2. Unknown tag -> denied; outside open hours -> denied (**entry and exit**); entry while already inside -> denied (anti-passback); exit while not inside -> denied; otherwise granted: location + headcount updated, that gate's servo opens 3 s. A room reader toggles the person between the lobby and that room (a person who is not inside is denied; no schedule check for moving between rooms). The headcount is always derived from the locations, so it cannot drift. Same tag on the same reader within 2 s is ignored. Card colours in Wokwi: Blue/Green/Yellow/Key fob are whitelisted, **Red is deliberately unknown**, the grey NFC tag (7-byte UID) is unsupported.
 
 **Lighting (per room):** motion -> 100%; motion stops -> 30% standby; 30 s without motion -> off; motion in standby -> 100%. Independent of RFID and headcount.
 
-**Evacuation:** button (GPIO 32) or `system_evacuation_set(true, "cli")` sets `SYS_EVT_EVACUATION`. The monitor task then holds both doors open and forces both rooms to 100%. Clearing restores normal behaviour.
+**Evacuation:** button (GPIO 32) or `system_evacuation_set(true, "cli")` sets `SYS_EVT_EVACUATION`. The monitor task then holds both doors open and forces both rooms to 100%, and:
+
+1. **Snapshots** everybody who is inside (and in which room) and logs `EVAC_ROSTER` lines.
+2. Tapping the **EXIT** reader marks a person **SAFE** (no schedule / anti-passback check). **ENTRY** is denied (no re-entry). A room tap still updates the person's location; a person nobody knew was inside is added to the roster.
+3. Every 10 s it logs `EVAC STATUS: safe x/y | inside n (lobby/R1/R2) | missing m`. Motion in a room where nobody is tagged raises `EVAC ALERT ... possible untagged person`.
+4. When nobody is inside and there is no motion it sets `SYS_EVT_EVAC_ALL_CLEAR` and logs `BUILDING EMPTY`.
+5. When the evacuation is cleared, the final report (`EVAC END` + one `MISSING <name>: <room> since HH:MM` line per person not accounted for) is logged **first**, then the building is **reset to empty** (everybody outside, headcount 0) and normal operation resumes.
+
+Live views: CLI `roster` and the LCD evacuation screen (inside / safe / per-room counts / missing).
 
 **Intrusion:** monitor task: building closed (`!is_access_permitted()`) + PIR motion -> `SYSLOG_INTRUSION` (rate-limited 30 s per room) + `SYS_EVT_INTRUSION` bit.
 
@@ -91,11 +100,11 @@ Producers send with timeout 0: a full queue drops the event with a warning inste
 
 | Module | Files | Status |
 |---|---|---|
-| Access control (M1) | `access_control.c/.h` | Done (anti-passback, evacuation latch). Role-based privileges: TODO |
+| Access control (M1) | `access_control.c/.h` | Done (anti-passback, 4 readers, room tracking, evacuation roster + reset) |
 | Lighting (M2) | `lighting_control.c/.h` | Done (2-stage dimming, getters, evacuation) |
 | Sync core (M3) | `system_sync.c/.h`, `main.c` | Done |
-| Storage + schedule (M4) | `data_storage.h`, `schedule.h` | **Stub** (`stub_data_storage.c`, `stub_schedule.c`) |
-| Serial CLI (M5) | `serial_cli.h` | **Stub** (`stub_serial_cli.c`) |
+| Storage + schedule (M4) | `data_storage.c`, `schedule.c` | Done |
+| Serial CLI (M5) | `serial_cli.c` | Done (new `roster` command, evacuation LCD screen) |
 
 ## 9. Guidelines for Members 4 and 5
 
@@ -117,10 +126,19 @@ Producers send with timeout 0: a full queue drops the event with a warning inste
 5. Click PIR 1 -> LED full; stop -> 30%; 30 s later -> off.
 6. Evacuation button -> doors held open + both LEDs full; press again -> normal.
 7. (After Member 4) set time outside hours -> scans denied both ways; motion -> `INTRUSION_ALERT`.
+8. Blue at ENTRY, then Blue at ROOM 1 reader -> `roster` shows Student A in ROOM1; tap ROOM 1 again -> LOBBY.
+9. Blue + Yellow inside, press the evacuation button -> log shows `EVAC START: safe 0/2 ...` and one `EVAC ROSTER` line each; LCD shows Inside:2 Safe:0/2.
+10. Blue at EXIT -> `EXIT_EVAC_SAFE`, `roster` shows Student A SAFE, Yellow `STILL INSIDE - RESCUE`. Blue at ENTRY -> denied (evacuation).
+11. Yellow at EXIT -> `BUILDING EMPTY` in the log, LCD "ALL CLEAR-BLDG EMPTY".
+12. Press the button again (or `evacuate off`) -> `EVAC END`, then the building is empty (`status`: headcount 0, Inside: nobody). Repeat 9 but clear while Yellow is still inside -> `EVAC END: 1 of 2 NOT accounted for` + `MISSING Lecturer: ROOM1 since ...`.
+13. Click PIR 2 while nobody is tagged in room 2 during an evacuation -> `EVAC ALERT: motion in ROOM2 ...`.
 
 ## 11. Known limitations / TODO
 
 - Only 4-byte UIDs are supported; whitelist is hard-coded in `access_control.c`.
-- Role-based privileges (lecturer/admin bypass schedule) not implemented.
+- Only tagged people are tracked: a visitor without a card is invisible to the roster (the room PIRs only warn "motion, nobody tagged here").
+- GPIO 0 and 12 are strapping pins. Fine in Wokwi; on real hardware keep GPIO 0 HIGH at reset and use GPIO 12 only with a module whose SDA line idles HIGH-impedance/low at boot (or move the Room 2 reader to a GPIO expander).
+- A room reader that does not answer at boot (not wired) is skipped, so the system still works with only the two main readers.
+- **ESP32 SPI limit:** one SPI host has only 3 hardware chip-select slots (ENTRY, EXIT and the SD card use them all). The two room readers therefore share ONE software-CS SPI device; the firmware pulls GPIO 0 / GPIO 12 low around each transaction (`rc522_xfer()` in `access_control.c`). Never add another device with `spics_io_num >= 0` on SPI3 or `spi_bus_add_device()` fails with `ESP_ERR_NO_MEM` and the board boot-loops.
 - Potentiometer is wired but unused.
 - Evacuation button must exist in `diagram.json` (GPIO 32 to GND); the CLI can also trigger it.

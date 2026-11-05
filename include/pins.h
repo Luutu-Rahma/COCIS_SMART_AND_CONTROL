@@ -13,9 +13,12 @@
 #define PIN_RFID_RST        15
 #define PIN_RFID_CS_ENTRY    5
 #define PIN_RFID_CS_EXIT     4
+#define PIN_RFID_CS_ROOM1    0   /* lecture room 1 door reader (boot pin: must be HIGH at reset) */
+#define PIN_RFID_CS_ROOM2   12   /* lecture room 2 door reader (strapping pin: see README)       */
 #define PIN_SD_CS            2   /* SD card chip select on the shared bus */
 
-/* Door servos (LEDC timer 0, channels 0-1) */
+/* Door servos (LEDC timer 0, channels 0-1).
+ * Corrected to match diagram.json and access_control.c: ENTRY = 33, EXIT = 27. */
 #define PIN_SERVO_ENTRY     33
 #define PIN_SERVO_EXIT      27
 
@@ -39,6 +42,6 @@
 #define PIN_UART_TX          1
 #define PIN_UART_RX          3
 
-/* GPIO 2 and 15 are strapping pins (real hardware only; Wokwi ignores this).
- * Free output-capable pins left: 0 (boot button) and 12 (strapping). */
+/* GPIO 0, 2, 12 and 15 are strapping pins (real hardware only; Wokwi ignores this).
+ * No output-capable pins are left now. Only input-only GPIO 35, 36, 39 remain free. */
 #endif /* PINS_H */
