@@ -43,6 +43,7 @@
 #define SYS_EVT_EVACUATION   (1u << 0)  /* global emergency override active          */
 #define SYS_EVT_INTRUSION    (1u << 1)  /* motion detected while building CLOSED     */
 #define SYS_EVT_SD_READY     (1u << 2)  /* set by storage_init() once the SD is mounted */
+#define SYS_EVT_EVAC_ALL_CLEAR (1u << 3) /* evacuation running AND the building is empty */
 
 /* ---------------- Shared handles (created by system_sync_init) ---------------- */
 extern EventGroupHandle_t g_system_events;
@@ -61,6 +62,9 @@ typedef enum {
     SYSLOG_CONFIG_CHANGE,    /* e.g. schedule changed by admin */
     SYSLOG_AUTH_FAIL,        /* failed admin login on the CLI */
     SYSLOG_ADMIN_ACTION,     /* admin command executed (e.g. open-door) */
+    SYSLOG_EVAC_ROSTER,      /* evacuation: who is inside / where / progress */
+    SYSLOG_EVAC_MISSING,     /* evacuation: person or room NOT accounted for */
+    SYSLOG_EVAC_ALL_CLEAR,   /* evacuation: building is empty, all accounted for */
 } system_log_type_t;
 
 typedef struct {
@@ -68,6 +72,17 @@ typedef struct {
     system_log_type_t type;
     char              text[96];
 } system_log_event_t;
+
+/* ---------------- Evacuation report (who is where, who is missing) ---------------- */
+typedef struct {
+    evac_summary_t people;          /* counts from the RFID roster                     */
+    bool           motion[2];       /* PIR motion now: [0] = room 1, [1] = room 2       */
+    bool           unregistered[2]; /* motion in a room where NO tagged person is       */
+    bool           all_clear;       /* nobody tagged inside AND no motion in any room   */
+} evac_report_t;
+
+/* Fill `r` from the access-control roster + the room PIR sensors. Thread-safe. */
+void system_evac_get_report(evac_report_t *r);
 
 /* ---------------- Tunables ---------------- */
 #define TASK_CORE            tskNO_AFFINITY   /* change to 0 or 1 to pin tasks */

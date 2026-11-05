@@ -5,14 +5,16 @@
  *   1. Talks to TWO MFRC522 (RC522) RFID readers over ONE shared SPI bus.
  *   2. Reads the 4-byte UID of a tag, checks it against a whitelist.
  *   3. Opens the correct door servo using PWM (LEDC) for a few seconds.
- *   4. Keeps the live headcount (+1 on entry, -1 on exit) and who is inside.
+ *   4. Keeps the live headcount and WHERE each person is (outside / lobby /
+ *      room 1 / room 2), using 4 readers: entry, exit, room 1 door, room 2 door.
  *   5. Emits an access_event_t to a queue so Member 4 can log it to the SD card.
+ *   6. EVACUATION: remembers who was inside when it started, marks people SAFE
+ *      when they tap the exit reader, and EMPTIES the building when it ends.
  *
  * Pin map (matches the Wokwi diagram):
- *   SPI bus (VSPI):  SCK=18  MISO=19  MOSI=23
- *   Entry reader:    SDA/CS=5        Exit reader: SDA/CS=4
- *   Shared RST:      15
- *   Entry servo PWM: 27              Exit servo PWM: 33
+ *   SPI bus (VSPI):  SCK=18  MISO=19  MOSI=23     Shared RST: 15
+ *   Chip selects:    ENTRY=5  EXIT=4  ROOM1=GPIO0  ROOM2=GPIO12
+ *   Entry servo PWM: 33              Exit servo PWM: 27
  */
 #include "access_control.h"
 
@@ -37,6 +39,8 @@ static const char *TAG = "ACCESS";
 #define PIN_SPI_MOSI     23
 #define PIN_CS_ENTRY     5
 #define PIN_CS_EXIT      4
+#define PIN_CS_ROOM1     0      /* lecture room 1 door reader (GPIO 0 = boot pin, keep idle HIGH) */
+#define PIN_CS_ROOM2     12     /* lecture room 2 door reader (GPIO 12 = strapping pin)          */
 #define PIN_RC522_RST    15
 #define PIN_SERVO_ENTRY  33
 #define PIN_SERVO_EXIT   27
@@ -85,7 +89,8 @@ static const char *TAG = "ACCESS";
 /* ------------------------------------------------------------------ */
 /*  Module state                                                       */
 /* ------------------------------------------------------------------ */
-static spi_device_handle_t s_rc522[GATE_COUNT];
+static spi_device_handle_t s_rc522[READER_COUNT];
+static bool s_reader_ok[READER_COUNT];   /* false = reader did not answer at boot (not wired) */
 
 static SemaphoreHandle_t s_spi_mutex   = NULL;  /* from Member 3 (optional) */
 static QueueHandle_t     s_event_queue = NULL;  /* from Member 3 (optional) */
@@ -93,10 +98,13 @@ static SemaphoreHandle_t s_state_mutex = NULL;  /* OURS: guards state below */
 
 /* --- Whitelist ---------------------------------------------------- */
 typedef struct {
-    uint8_t     uid[AC_UID_LEN];
-    const char *name;
-    bool        inside;           /* anti-passback flag */
-    user_role_t role;           /*role from schedule.h*/
+    uint8_t      uid[AC_UID_LEN];
+    const char  *name;
+    person_loc_t loc;             /* LOC_OUTSIDE = not inside (also the anti-passback flag) */
+    user_role_t  role;            /* role from schedule.h */
+    time_t       since;           /* when `loc` last changed */
+    bool         expected;        /* evacuation: was inside when it started */
+    bool         safe;            /* evacuation: has reached the exit       */
 } user_t;
 
 typedef struct {
@@ -113,10 +121,10 @@ typedef struct {
  * Red is deliberately left OUT so you can test "unknown tag".
  */
 static user_t s_users[] = {
-    { {0x01, 0x02, 0x03, 0x04}, "Student A",  false, ROLE_STUDENT  },   /* Blue   */
-    { {0x11, 0x22, 0x33, 0x44}, "Student B",  false, ROLE_STUDENT  },   /* Green  */
-    { {0x55, 0x66, 0x77, 0x88}, "Lecturer",   false, ROLE_LECTURER },   /* Yellow */
-    { {0xC0, 0xFF, 0xEE, 0x99}, "Security",   false, ROLE_ADMIN    },   /* Key fob */
+    { .uid = {0x01, 0x02, 0x03, 0x04}, .name = "Student A",  .loc = LOC_OUTSIDE, .role = ROLE_STUDENT  },   /* Blue   */
+    { .uid = {0x11, 0x22, 0x33, 0x44}, .name = "Student B",  .loc = LOC_OUTSIDE, .role = ROLE_STUDENT  },   /* Green  */
+    { .uid = {0x55, 0x66, 0x77, 0x88}, .name = "Lecturer",   .loc = LOC_OUTSIDE, .role = ROLE_LECTURER },   /* Yellow */
+    { .uid = {0xC0, 0xFF, 0xEE, 0x99}, .name = "Security",   .loc = LOC_OUTSIDE, .role = ROLE_ADMIN    },   /* Key fob */
 };
 #define NUM_USERS (sizeof(s_users) / sizeof(s_users[0]))
 
@@ -132,7 +140,28 @@ static door_t s_doors[GATE_COUNT];
 
 static const int           s_servo_pin[GATE_COUNT] = { PIN_SERVO_ENTRY, PIN_SERVO_EXIT };
 static const ledc_channel_t s_servo_ch[GATE_COUNT] = { LEDC_CHANNEL_0, LEDC_CHANNEL_1 };
-static const int           s_cs_pin[GATE_COUNT]    = { PIN_CS_ENTRY, PIN_CS_EXIT };
+static const int           s_cs_pin[READER_COUNT]  = { PIN_CS_ENTRY, PIN_CS_EXIT, PIN_CS_ROOM1, PIN_CS_ROOM2 };
+
+static const char *reader_name(reader_t r)
+{
+    switch (r) {
+    case READER_ENTRY: return "ENTRY";
+    case READER_EXIT:  return "EXIT";
+    case READER_ROOM1: return "ROOM1";
+    case READER_ROOM2: return "ROOM2";
+    default:           return "?";
+    }
+}
+
+/*
+ * IMPORTANT (ESP32 limit): one SPI host has only 3 hardware chip-select slots, and any
+ * SPI device created with spics_io_num >= 0 takes one. ENTRY + EXIT + the SD card already
+ * use all 3, so asking for a 4th makes spi_bus_add_device() fail with ESP_ERR_NO_MEM
+ * (boot loop). The two ROOM readers therefore use a SOFTWARE chip-select: ONE shared SPI
+ * device with spics_io_num = -1, and the firmware pulls the reader's CS GPIO low around
+ * every transaction itself (see rc522_xfer). -1 = "this reader uses the hardware CS".
+ */
+static const int s_soft_cs[READER_COUNT] = { -1, -1, PIN_CS_ROOM1, PIN_CS_ROOM2 };
 
 /* ------------------------------------------------------------------ */
 /*  Weak default for Member 4's function                               */
@@ -150,28 +179,37 @@ __attribute__((weak)) bool is_access_permitted(void)
  *   address byte = (reg << 1) & 0x7E, and bit7 = 1 for a READ.
  * For a read we clock out a dummy 0x00 and the chip answers in byte 2.
  */
-static void rc522_write(gate_t g, uint8_t reg, uint8_t val)
+/* One SPI frame to reader g. For the room readers the CS GPIO is driven by hand. */
+static void rc522_xfer(reader_t g, spi_transaction_t *t)
+{
+    if (s_soft_cs[g] >= 0) gpio_set_level(s_soft_cs[g], 0);
+    esp_err_t e = spi_device_transmit(s_rc522[g], t);
+    if (s_soft_cs[g] >= 0) gpio_set_level(s_soft_cs[g], 1);
+    (void)e;
+}
+
+static void rc522_write(reader_t g, uint8_t reg, uint8_t val)
 {
     uint8_t tx[2] = { (uint8_t)((reg << 1) & 0x7E), val };
     spi_transaction_t t = { .length = 16, .tx_buffer = tx };
-    spi_device_transmit(s_rc522[g], &t);
+    rc522_xfer(g, &t);
 }
 
-static uint8_t rc522_read(gate_t g, uint8_t reg)
+static uint8_t rc522_read(reader_t g, uint8_t reg)
 {
     uint8_t tx[2] = { (uint8_t)(((reg << 1) & 0x7E) | 0x80), 0x00 };
     uint8_t rx[2] = { 0, 0 };
     spi_transaction_t t = { .length = 16, .tx_buffer = tx, .rx_buffer = rx };
-    spi_device_transmit(s_rc522[g], &t);
+    rc522_xfer(g, &t);
     return rx[1];
 }
 
-static void rc522_set_bits(gate_t g, uint8_t reg, uint8_t mask)
+static void rc522_set_bits(reader_t g, uint8_t reg, uint8_t mask)
 {
     rc522_write(g, reg, rc522_read(g, reg) | mask);
 }
 
-static void rc522_clear_bits(gate_t g, uint8_t reg, uint8_t mask)
+static void rc522_clear_bits(reader_t g, uint8_t reg, uint8_t mask)
 {
     rc522_write(g, reg, rc522_read(g, reg) & (uint8_t)~mask);
 }
@@ -185,17 +223,17 @@ static void rc522_clear_bits(gate_t g, uint8_t reg, uint8_t mask)
  */
 #define FIFO_MAX 16
 
-static void rc522_write_fifo(gate_t g, const uint8_t *data, uint8_t len)
+static void rc522_write_fifo(reader_t g, const uint8_t *data, uint8_t len)
 {
     uint8_t tx[FIFO_MAX + 1];
     if (len > FIFO_MAX) len = FIFO_MAX;
     tx[0] = (uint8_t)((REG_FIFO_DATA << 1) & 0x7E);
     memcpy(&tx[1], data, len);
     spi_transaction_t t = { .length = (size_t)(len + 1) * 8, .tx_buffer = tx };
-    spi_device_transmit(s_rc522[g], &t);
+    rc522_xfer(g, &t);
 }
 
-static void rc522_read_fifo(gate_t g, uint8_t *buf, uint8_t n)
+static void rc522_read_fifo(reader_t g, uint8_t *buf, uint8_t n)
 {
     uint8_t tx[FIFO_MAX + 1], rx[FIFO_MAX + 1];
     if (n == 0) return;
@@ -205,7 +243,7 @@ static void rc522_read_fifo(gate_t g, uint8_t *buf, uint8_t n)
     tx[n] = 0x00;
     memset(rx, 0, sizeof(rx));
     spi_transaction_t t = { .length = (size_t)(n + 1) * 8, .tx_buffer = tx, .rx_buffer = rx };
-    spi_device_transmit(s_rc522[g], &t);
+    rc522_xfer(g, &t);
     memcpy(buf, &rx[1], n);
 }
 
@@ -214,7 +252,7 @@ static void rc522_read_fifo(gate_t g, uint8_t *buf, uint8_t n)
 /* ================================================================== */
 
 /* Ask the RC522's hardware to compute the ISO14443 CRC_A of a buffer. */
-static bool rc522_calc_crc(gate_t g, const uint8_t *data, uint8_t len, uint8_t out[2])
+static bool rc522_calc_crc(reader_t g, const uint8_t *data, uint8_t len, uint8_t out[2])
 {
     rc522_write(g, REG_COMMAND, CMD_IDLE);
     rc522_write(g, REG_DIV_IRQ, 0x04);           /* clear CRCIRq flag  */
@@ -239,7 +277,7 @@ static bool rc522_calc_crc(gate_t g, const uint8_t *data, uint8_t len, uint8_t o
  *   tx_last_bits: number of valid bits in the last tx byte (0 = all 8,
  *                 7 is used for the short REQA frame).
  */
-static bool rc522_transceive(gate_t g, const uint8_t *tx, uint8_t tx_len,
+static bool rc522_transceive(reader_t g, const uint8_t *tx, uint8_t tx_len,
                              uint8_t *rx, uint8_t *rx_len, uint8_t tx_last_bits)
 {
     rc522_write(g, REG_COMMAND, CMD_IDLE);       /* stop any command     */
@@ -272,7 +310,7 @@ static bool rc522_transceive(gate_t g, const uint8_t *tx, uint8_t tx_len,
 }
 
 /* Step 1: "Is any card in the field?"  (REQA -> card answers with ATQA) */
-static bool picc_request(gate_t g)
+static bool picc_request(reader_t g)
 {
     rc522_clear_bits(g, REG_COLL, 0x80);
     uint8_t cmd = PICC_REQA, atqa[2], len = sizeof(atqa);
@@ -280,7 +318,7 @@ static bool picc_request(gate_t g)
 }
 
 /* Step 2+3: anti-collision (card sends its UID) then SELECT it. */
-static bool picc_read_uid(gate_t g, uint8_t uid[AC_UID_LEN])
+static bool picc_read_uid(reader_t g, uint8_t uid[AC_UID_LEN])
 {
     /* Anti-collision: NVB=0x20 means "I know 0 bits, send me everything" */
     uint8_t ac_cmd[2] = { PICC_SEL_CL1, 0x20 };
@@ -323,14 +361,14 @@ static bool picc_read_uid(gate_t g, uint8_t uid[AC_UID_LEN])
 }
 
 /* Put the card to sleep so it is not re-read while it stays in the field */
-static void picc_halt(gate_t g)
+static void picc_halt(reader_t g)
 {
     uint8_t buf[4] = { PICC_HLTA, 0x00 };
     if (!rc522_calc_crc(g, buf, 2, &buf[2])) return;
     rc522_transceive(g, buf, 4, NULL, NULL, 0);   /* card never answers (timeout is normal) */
 }
 
-static void rc522_chip_init(gate_t g)
+static void rc522_chip_init(reader_t g)
 {
     rc522_write(g, REG_COMMAND, CMD_SOFT_RESET);
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -344,8 +382,9 @@ static void rc522_chip_init(gate_t g)
     rc522_set_bits(g, REG_TX_CONTROL, 0x03); /* antenna ON              */
 
     uint8_t ver = rc522_read(g, REG_VERSION);
+    s_reader_ok[g] = !(ver == 0x00 || ver == 0xFF);
     ESP_LOGI(TAG, "%s reader VersionReg = 0x%02X %s",
-             g == GATE_ENTRY ? "ENTRY" : "EXIT", ver,
+             reader_name((reader_t)g), ver,
              (ver == 0x00 || ver == 0xFF) ? "<-- NO RESPONSE, CHECK WIRING!" : "(OK)");
 }
 
@@ -422,7 +461,7 @@ static void doors_update(void)
         xSemaphoreGive(s_state_mutex);
         if (close_now) {
             servo_write_angle((gate_t)g, SERVO_ANGLE_CLOSED);
-            ESP_LOGI(TAG, "%s DOOR CLOSED", g == GATE_ENTRY ? "ENTRY" : "EXIT");
+            ESP_LOGI(TAG, "%s DOOR CLOSED", reader_name((reader_t)g));
         }
     }
 }
@@ -445,52 +484,142 @@ static const char *result_str(access_result_t r)
     case ACCESS_DENIED_SCHEDULE:       return "DENIED (outside allowed hours)";
     case ACCESS_DENIED_ALREADY_INSIDE: return "DENIED (already inside)";
     case ACCESS_DENIED_NOT_INSIDE:     return "DENIED (not inside)";
+    case ACCESS_DENIED_EVACUATION:     return "DENIED (evacuation in progress)";
+    case ACCESS_EVAC_SAFE:             return "EVACUATION: marked SAFE";
     default:                           return "?";
     }
 }
 
-static void handle_scan(gate_t g, const uint8_t uid[AC_UID_LEN])
+const char *access_control_loc_str(person_loc_t loc)
+{
+    switch (loc) {
+    case LOC_OUTSIDE: return "OUTSIDE";
+    case LOC_LOBBY:   return "LOBBY";
+    case LOC_ROOM1:   return "ROOM1";
+    case LOC_ROOM2:   return "ROOM2";
+    default:          return "?";
+    }
+}
+
+/* ---- helpers: ALL of these must be called with s_state_mutex held ---- */
+static inline bool user_inside(const user_t *u) { return u->loc != LOC_OUTSIDE; }
+
+static void user_set_loc(user_t *u, person_loc_t loc)
+{
+    if (u->loc == loc) return;
+    u->loc   = loc;
+    u->since = time(NULL);
+}
+
+/* The headcount is always DERIVED from the locations, so it can never drift. */
+static void recount_headcount(void)
+{
+    int n = 0;
+    for (size_t i = 0; i < NUM_USERS; i++) if (user_inside(&s_users[i])) n++;
+    s_headcount = n;
+}
+
+static person_loc_t room_of(reader_t r)
+{
+    return (r == READER_ROOM1) ? LOC_ROOM1 : LOC_ROOM2;
+}
+
+/* Normal operation. `permitted` = building open for this person's role. */
+static access_result_t scan_normal(user_t *u, reader_t r, bool permitted)
+{
+    switch (r) {
+    case READER_ENTRY:
+        if (!permitted)       return ACCESS_DENIED_SCHEDULE;
+        if (user_inside(u))   return ACCESS_DENIED_ALREADY_INSIDE;
+        user_set_loc(u, LOC_LOBBY);
+        return ACCESS_GRANTED;
+    case READER_EXIT:
+        if (!permitted)       return ACCESS_DENIED_SCHEDULE;       /* applies to EXIT too */
+        if (!user_inside(u))  return ACCESS_DENIED_NOT_INSIDE;
+        user_set_loc(u, LOC_OUTSIDE);
+        return ACCESS_GRANTED;
+    case READER_ROOM1:
+    case READER_ROOM2: {
+        /* Moving between rooms is allowed at any time once you are inside. */
+        if (!user_inside(u))  return ACCESS_DENIED_NOT_INSIDE;
+        person_loc_t room = room_of(r);
+        user_set_loc(u, (u->loc == room) ? LOC_LOBBY : room);      /* tap = enter / leave the room */
+        return ACCESS_GRANTED;
+    }
+    default:
+        return ACCESS_DENIED_UNKNOWN_TAG;
+    }
+}
+
+/* Evacuation: no schedule, no anti-passback. Reaching the exit = SAFE. */
+static access_result_t scan_evacuation(user_t *u, reader_t r)
+{
+    switch (r) {
+    case READER_ENTRY:
+        return ACCESS_DENIED_EVACUATION;                           /* nobody goes back in */
+    case READER_EXIT:
+        user_set_loc(u, LOC_OUTSIDE);
+        u->safe = true;
+        return ACCESS_EVAC_SAFE;
+    case READER_ROOM1:
+    case READER_ROOM2: {
+        if (u->safe) return ACCESS_DENIED_EVACUATION;              /* already out: no going back */
+        person_loc_t room = room_of(r);
+        if (user_inside(u)) {
+            user_set_loc(u, (u->loc == room) ? LOC_LOBBY : room);
+        } else {
+            /* Someone nobody knew was inside (forgot to tap in): now they are located. */
+            user_set_loc(u, room);
+            u->expected = true;
+        }
+        return ACCESS_GRANTED;
+    }
+    default:
+        return ACCESS_DENIED_UNKNOWN_TAG;
+    }
+}
+
+static void handle_scan(reader_t r, const uint8_t uid[AC_UID_LEN])
 {
     access_event_t ev;
     memset(&ev, 0, sizeof(ev));
     memcpy(ev.uid, uid, AC_UID_LEN);
-    ev.gate      = g;
+    ev.reader    = r;
     ev.timestamp = time(NULL);
 
+    /* The schedule check locks g_config_mutex, so do it BEFORE taking our own mutex
+     * (lock rule: never call another module while holding yours). The whitelist's
+     * uid / name / role never change after boot, so reading them here is safe. */
+    int  idx       = find_user(uid);
+    bool permitted = (idx >= 0) && is_access_permitted_for_role(s_users[idx].role);
+    bool open_door = false;
 
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
-    int idx = find_user(uid);
     if (idx < 0) {
         ev.result = ACCESS_DENIED_UNKNOWN_TAG;
     } else {
-        strlcpy(ev.name, s_users[idx].name, sizeof(ev.name));
-        if (!is_access_permitted_for_role(s_users[idx].role)) {
-            ev.result = ACCESS_DENIED_SCHEDULE;          /* applies to EXIT too */
-        } else if (g == GATE_ENTRY && s_users[idx].inside) {
-            ev.result = ACCESS_DENIED_ALREADY_INSIDE;
-        } else if (g == GATE_EXIT && !s_users[idx].inside) {
-            ev.result = ACCESS_DENIED_NOT_INSIDE;
-        } else {
-            ev.result = ACCESS_GRANTED;
-            s_users[idx].inside = (g == GATE_ENTRY);
-            s_headcount += (g == GATE_ENTRY) ? 1 : -1;
-            if (s_headcount < 0) s_headcount = 0;        /* safety net */
-        }
+        user_t *u = &s_users[idx];
+        strlcpy(ev.name, u->name, sizeof(ev.name));
+        ev.result   = s_evacuation ? scan_evacuation(u, r) : scan_normal(u, r, permitted);
+        ev.location = u->loc;
+        open_door   = (ev.result == ACCESS_GRANTED) && ((int)r < GATE_COUNT);
     }
+    recount_headcount();
     ev.headcount = s_headcount;
     xSemaphoreGive(s_state_mutex);
 
-    if (ev.result == ACCESS_GRANTED) {
-        access_control_open_door(g, DOOR_OPEN_MS);
+    if (open_door) {
+        access_control_open_door((gate_t)r, DOOR_OPEN_MS);
     }
 
     if (idx < 0) {
         ESP_LOGW(TAG, "UNKNOWN TAG %02X:%02X:%02X:%02X at %s",
-                 uid[0], uid[1], uid[2], uid[3], g == GATE_ENTRY ? "ENTRY" : "EXIT");
+                 uid[0], uid[1], uid[2], uid[3], reader_name(r));
     }
-    ESP_LOGI(TAG, "[%s] %s %02X:%02X:%02X:%02X -> %s | headcount=%d",
-             g == GATE_ENTRY ? "ENTRY" : "EXIT", ev.name[0] ? ev.name : "-",
-             uid[0], uid[1], uid[2], uid[3], result_str(ev.result), ev.headcount);
+    ESP_LOGI(TAG, "[%s] %s %02X:%02X:%02X:%02X -> %s | headcount=%d | location=%s",
+             reader_name(r), ev.name[0] ? ev.name : "-",
+             uid[0], uid[1], uid[2], uid[3], result_str(ev.result), ev.headcount,
+             access_control_loc_str(ev.location));
 
     /* Hand the event to Member 4's logger (non-blocking: never stall the door) */
     if (s_event_queue) {
@@ -512,6 +641,22 @@ void access_control_set_evacuation(bool active)
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     changed = (s_evacuation != active);
     s_evacuation = active;
+    if (changed && active) {
+        /* Snapshot: everybody inside right now must be accounted for. */
+        for (size_t i = 0; i < NUM_USERS; i++) {
+            s_users[i].expected = user_inside(&s_users[i]);
+            s_users[i].safe     = false;
+        }
+    } else if (changed && !active) {
+        /* End of evacuation: the building is declared EMPTY. (The monitor has
+         * already logged who was still missing, before calling us.) */
+        for (size_t i = 0; i < NUM_USERS; i++) {
+            user_set_loc(&s_users[i], LOC_OUTSIDE);
+            s_users[i].expected = false;
+            s_users[i].safe     = false;
+        }
+        recount_headcount();
+    }
     if (active) {
         for (int g = 0; g < GATE_COUNT; g++) {
             s_doors[g].open = true;
@@ -527,7 +672,7 @@ void access_control_set_evacuation(bool active)
         for (int g = 0; g < GATE_COUNT; g++) servo_write_angle((gate_t)g, SERVO_ANGLE_OPEN);
         ESP_LOGW(TAG, "evacuation active: both doors held open");
     } else {
-        ESP_LOGW(TAG, "evacuation cleared: doors will close on next update");
+        ESP_LOGW(TAG, "evacuation cleared: doors will close, building reset to EMPTY (headcount 0)");
     }
 }
 
@@ -544,10 +689,47 @@ int access_control_list_inside(char names[][AC_NAME_LEN], int max)
     int count = 0;
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     for (size_t i = 0; i < NUM_USERS && count < max; i++) {
-        if (s_users[i].inside) strlcpy(names[count++], s_users[i].name, AC_NAME_LEN);
+        if (user_inside(&s_users[i])) strlcpy(names[count++], s_users[i].name, AC_NAME_LEN);
     }
     xSemaphoreGive(s_state_mutex);
     return count;
+}
+
+int access_control_get_roster(person_status_t *out, int max)
+{
+    int n = 0;
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    for (size_t i = 0; i < NUM_USERS && n < max; i++) {
+        const user_t *u = &s_users[i];
+        strlcpy(out[n].name, u->name, AC_NAME_LEN);
+        out[n].location = u->loc;
+        out[n].since    = u->since;
+        out[n].expected = u->expected;
+        out[n].safe     = u->safe;
+        n++;
+    }
+    xSemaphoreGive(s_state_mutex);
+    return n;
+}
+
+void access_control_get_evac_summary(evac_summary_t *s)
+{
+    memset(s, 0, sizeof(*s));
+    xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+    for (size_t i = 0; i < NUM_USERS; i++) {
+        const user_t *u = &s_users[i];
+        if (user_inside(u)) {
+            s->inside++;
+            if (u->loc == LOC_LOBBY) s->in_lobby++;
+            if (u->loc == LOC_ROOM1) s->in_room[0]++;
+            if (u->loc == LOC_ROOM2) s->in_room[1]++;
+        }
+        if (u->expected) {
+            s->expected++;
+            if (u->safe) s->safe++; else s->missing++;
+        }
+    }
+    xSemaphoreGive(s_state_mutex);
 }
 
 esp_err_t access_control_init(void)
@@ -567,8 +749,35 @@ esp_err_t access_control_init(void)
     esp_err_t err = spi_bus_initialize(RC522_SPI_HOST, &bus, SPI_DMA_CH_AUTO);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
 
-    /* --- One SPI "device" per reader: same bus, different CS pin ---- */
-    for (int g = 0; g < GATE_COUNT; g++) {
+    /* --- SPI "devices". ENTRY / EXIT: hardware CS. ROOM1 / ROOM2: ONE shared
+     *     software-CS device (see the note at s_soft_cs). --------------------- */
+    spi_device_handle_t soft_dev = NULL;
+    for (int g = 0; g < READER_COUNT; g++) {
+        if (s_soft_cs[g] >= 0) {
+            /* CS GPIO: plain output, idle HIGH (= not selected) */
+            gpio_config_t cs = {
+                .pin_bit_mask = 1ULL << s_soft_cs[g],
+                .mode         = GPIO_MODE_OUTPUT,
+            };
+            gpio_config(&cs);
+            gpio_set_level(s_soft_cs[g], 1);
+
+            if (soft_dev == NULL) {
+                spi_device_interface_config_t dev = {
+                    .clock_speed_hz = 1 * 1000 * 1000,
+                    .mode           = 0,
+                    .spics_io_num   = -1,              /* software CS */
+                    .queue_size     = 3,
+                };
+                err = spi_bus_add_device(RC522_SPI_HOST, &dev, &soft_dev);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "spi_bus_add_device(room readers, software CS) failed: %s", esp_err_to_name(err));
+                    return err;
+                }
+            }
+            s_rc522[g] = soft_dev;
+            continue;
+        }
         spi_device_interface_config_t dev = {
             .clock_speed_hz = 1 * 1000 * 1000,  /* 1 MHz is safe for RC522 */
             .mode           = 0,
@@ -576,7 +785,11 @@ esp_err_t access_control_init(void)
             .queue_size     = 3,
         };
         err = spi_bus_add_device(RC522_SPI_HOST, &dev, &s_rc522[g]);
-        if (err != ESP_OK) return err;
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "spi_bus_add_device(%s, CS=%d) failed: %s",
+                     reader_name((reader_t)g), s_cs_pin[g], esp_err_to_name(err));
+            return err;
+        }
     }
 
     /* --- Shared hardware RESET line for both readers ---------------- */
@@ -590,28 +803,28 @@ esp_err_t access_control_init(void)
     gpio_set_level(PIN_RC522_RST, 1);
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    for (int g = 0; g < GATE_COUNT; g++) rc522_chip_init((gate_t)g);
+    for (int g = 0; g < READER_COUNT; g++) rc522_chip_init((reader_t)g);
 
     servos_init();
 
-    ESP_LOGI(TAG, "access control ready (whitelist: %u users)", (unsigned)NUM_USERS);
+    ESP_LOGI(TAG, "access control ready (whitelist: %u users, %d readers)", (unsigned)NUM_USERS, READER_COUNT);
     return ESP_OK;
 }
 
 /* ================================================================== */
 /*  The FreeRTOS task                                                  */
 /* ================================================================== */
-static bool poll_gate(gate_t g, uint8_t uid[AC_UID_LEN])
+static bool poll_gate(reader_t g, uint8_t uid[AC_UID_LEN])
 {
     bool ok = false;
     if (s_spi_mutex) xSemaphoreTake(s_spi_mutex, portMAX_DELAY);   /* lock shared bus */
     if (picc_request(g)) {
-        ESP_LOGI(TAG, "%s: card detected in field", g == GATE_ENTRY ? "ENTRY" : "EXIT");
+        ESP_LOGI(TAG, "%s: card detected in field", reader_name((reader_t)g));
         if (picc_read_uid(g, uid)) {
             ok = true;
             picc_halt(g);
         } else {
-            ESP_LOGW(TAG, "%s: card detected but UID read FAILED", g == GATE_ENTRY ? "ENTRY" : "EXIT");
+            ESP_LOGW(TAG, "%s: card detected but UID read FAILED", reader_name((reader_t)g));
         }
     }
     if (s_spi_mutex) xSemaphoreGive(s_spi_mutex);                  /* unlock */
@@ -621,20 +834,23 @@ static bool poll_gate(gate_t g, uint8_t uid[AC_UID_LEN])
 void vTaskAccessControl(void *pvParameters)
 {
     (void)pvParameters;
-    ESP_LOGI(TAG, "access task running, polling both readers every %d ms", POLL_PERIOD_MS);
-    uint8_t last_uid[GATE_COUNT][AC_UID_LEN] = {{0}};
-    int64_t last_seen_us[GATE_COUNT] = {0};
+    ESP_LOGI(TAG, "access task running, polling %d readers every %d ms", READER_COUNT, POLL_PERIOD_MS);
+    uint8_t last_uid[READER_COUNT][AC_UID_LEN] = {{0}};
+    int64_t last_seen_us[READER_COUNT] = {0};
 
     for (;;) {
-        for (int g = 0; g < GATE_COUNT; g++) {
+        for (int g = 0; g < READER_COUNT; g++) {
+            /* A room reader that never answered at boot is simply not wired: skip it
+             * so it cannot slow the polling of the real readers. */
+            if (g >= GATE_COUNT && !s_reader_ok[g]) continue;
             uint8_t uid[AC_UID_LEN];
-            if (poll_gate((gate_t)g, uid)) {
+            if (poll_gate((reader_t)g, uid)) {
                 int64_t now = esp_timer_get_time();
                 bool same = memcmp(uid, last_uid[g], AC_UID_LEN) == 0 &&
                             (now - last_seen_us[g]) < SAME_TAG_LOCKOUT_US;
                 memcpy(last_uid[g], uid, AC_UID_LEN);
                 last_seen_us[g] = now;
-                if (!same) handle_scan((gate_t)g, uid);   /* debounce */
+                if (!same) handle_scan((reader_t)g, uid);   /* debounce */
             }
         }
         doors_update();

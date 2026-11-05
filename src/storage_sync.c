@@ -13,9 +13,15 @@
 static const char *TAG = "STORAGE";
 static volatile bool s_sd_ready = false;
 
-static const char *gate_name(gate_t g)
+static const char *reader_name(reader_t r)
 {
-    return (g == GATE_ENTRY) ? "ENTRY" : "EXIT";
+    switch (r) {
+    case READER_ENTRY: return "ENTRY";
+    case READER_EXIT:  return "EXIT";
+    case READER_ROOM1: return "ROOM1";
+    case READER_ROOM2: return "ROOM2";
+    default:           return "READER";
+    }
 }
 
 static const char *ac_result_name(access_result_t r)
@@ -26,6 +32,8 @@ static const char *ac_result_name(access_result_t r)
     case ACCESS_DENIED_SCHEDULE:       return "DENIED_SCHEDULE";
     case ACCESS_DENIED_ALREADY_INSIDE: return "DENIED_ALREADY_INSIDE";
     case ACCESS_DENIED_NOT_INSIDE:     return "DENIED_NOT_INSIDE";
+    case ACCESS_DENIED_EVACUATION:     return "DENIED_EVACUATION";
+    case ACCESS_EVAC_SAFE:             return "EVAC_SAFE";
     default:                           return "UNKNOWN";
     }
 }
@@ -89,10 +97,11 @@ void vTaskStorage(void *pvParameters)
 
     for (;;) {
         if (xQueueReceive(g_access_queue, &ev, pdMS_TO_TICKS(100)) == pdTRUE) {
-            snprintf(type, sizeof(type), "%s_%s", gate_name(ev.gate), ac_result_name(ev.result));
-            snprintf(detail, sizeof(detail), "%02X:%02X:%02X:%02X;%s;headcount=%d",
+            snprintf(type, sizeof(type), "%s_%s", reader_name(ev.reader), ac_result_name(ev.result));
+            snprintf(detail, sizeof(detail), "%02X:%02X:%02X:%02X;%s;headcount=%d;loc=%s",
                      ev.uid[0], ev.uid[1], ev.uid[2], ev.uid[3],
-                     ev.name[0] ? ev.name : "UNKNOWN", ev.headcount);
+                     ev.name[0] ? ev.name : "UNKNOWN", ev.headcount,
+                     access_control_loc_str(ev.location));
             store(type, detail);
         }
 
@@ -105,4 +114,3 @@ void vTaskStorage(void *pvParameters)
         }
     }
 }
-

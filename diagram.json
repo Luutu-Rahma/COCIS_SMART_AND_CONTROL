@@ -6,6 +6,20 @@
     { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 120, "left": 0, "attrs": {} },
     {
       "type": "board-mfrc522",
+      "id": "rfid3",
+      "top": -700,
+      "left": 650,
+      "attrs": {}
+    },
+    {
+      "type": "board-mfrc522",
+      "id": "rfid4",
+      "top": -700,
+      "left": 950,
+      "attrs": {}
+    },
+    {
+      "type": "board-mfrc522",
       "id": "rfid1",
       "top": -521.05,
       "left": -593.76,
@@ -181,7 +195,21 @@
     [ "buzzer1:2", "esp:17", "orange", [ "v19.2", "h527.6", "v-292.8" ] ],
     [ "btn_evac:1.l", "esp:32", "violet", [ "v-19.2", "h499.2", "v-110.4" ] ],
     [ "r1:1", "esp:25", "green", [ "v9.6", "h-1084.8", "v302.4" ] ],
-    [ "servo2:GND", "esp:GND.3", "black", [ "v0" ] ]
+    [ "servo2:GND", "esp:GND.3", "black", [ "v0" ] ],
+    [ "rfid3:GND", "esp:GND.2", "black", [] ],
+    [ "rfid3:3.3V", "esp:3V3", "red", [] ],
+    [ "rfid3:SCK", "esp:18", "orange", [] ],
+    [ "rfid3:MOSI", "esp:23", "green", [] ],
+    [ "rfid3:MISO", "esp:19", "blue", [] ],
+    [ "rfid3:RST", "esp:15", "yellow", [] ],
+    [ "rfid3:SDA", "esp:0", "violet", [] ],
+    [ "rfid4:GND", "esp:GND.2", "black", [] ],
+    [ "rfid4:3.3V", "esp:3V3", "red", [] ],
+    [ "rfid4:SCK", "esp:18", "orange", [] ],
+    [ "rfid4:MOSI", "esp:23", "green", [] ],
+    [ "rfid4:MISO", "esp:19", "blue", [] ],
+    [ "rfid4:RST", "esp:15", "yellow", [] ],
+    [ "rfid4:SDA", "esp:12", "violet", [] ]
   ],
   "dependencies": {}
 }
