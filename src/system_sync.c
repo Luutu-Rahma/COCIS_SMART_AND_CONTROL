@@ -1,6 +1,4 @@
-/*
- * system_sync.c -- MEMBER 3: FreeRTOS primitives, task creation, system monitor
- */
+/* freertos synchronization and system monitor */
 #include "system_sync.h"
 
 #include <stdarg.h>
@@ -16,7 +14,6 @@
 
 static const char *TAG = "SYS_SYNC";
 
-/* ---- Task configuration (stack size in BYTES, higher number = higher priority) ---- */
 #define STACK_ACCESS      4096
 #define STACK_LIGHTING    3072
 #define STACK_MONITOR     4096   /* was 3072: evacuation reporting uses more stack */
@@ -37,7 +34,6 @@ static const char *TAG = "SYS_SYNC";
 #define EVAC_STATUS_PERIOD_MS      10000   /* progress line while people are still inside */
 #define EVAC_MAX_PEOPLE            16
 
-/* ---- Shared handles ---- */
 EventGroupHandle_t g_system_events = NULL;
 SemaphoreHandle_t  g_spi_mutex     = NULL;
 SemaphoreHandle_t  g_sd_mutex      = NULL;
@@ -45,9 +41,6 @@ SemaphoreHandle_t  g_config_mutex  = NULL;
 QueueHandle_t      g_access_queue  = NULL;
 QueueHandle_t      g_syslog_queue  = NULL;
 
-/* ================================================================== */
-/*  Helpers                                                            */
-/* ================================================================== */
 const char *system_log_type_str(system_log_type_t t)
 {
     switch (t) {
@@ -81,7 +74,7 @@ bool system_log_post(system_log_type_t type, const char *fmt, ...)
 
     ESP_LOGI(TAG, "%s: %s", system_log_type_str(type), ev.text);
 
-    /* Non-blocking: never stall the caller because the logger is slow */
+    /* Keep logging non-blocking for callers. */
     if (xQueueSend(g_syslog_queue, &ev, 0) != pdTRUE) {
         ESP_LOGW(TAG, "syslog queue full, event dropped");
         return false;
@@ -98,7 +91,7 @@ bool system_evacuation_active(void)
 void system_evacuation_set(bool active, const char *source)
 {
     if (!g_system_events) return;
-    if (system_evacuation_active() == active) return;   /* no change */
+    if (system_evacuation_active() == active) return;
 
     if (active) xEventGroupSetBits(g_system_events, SYS_EVT_EVACUATION);
     else        xEventGroupClearBits(g_system_events, SYS_EVT_EVACUATION);
@@ -109,17 +102,16 @@ void system_evacuation_set(bool active, const char *source)
                     source ? source : "unknown");
 }
 
-/* Boot clock: EAT timezone; if the clock was never set, start at a fixed daytime
- * so the schedule is "open" at boot. The CLI can change it later. */
+/* Set EAT and initialize an unset clock to daytime. */
 static void clock_init_default(void)
 {
     setenv("TZ", "EAT-3", 1);
     tzset();
 
-    if (time(NULL) < 1700000000) {   /* clock still at 1970 -> not set */
+    if (time(NULL) < 1700000000) {
         struct tm t = {0};
         t.tm_year = 2026 - 1900;
-        t.tm_mon  = 10;              /* November (0-based) */
+        t.tm_mon  = 10;
         t.tm_mday = 2;
         t.tm_hour = 9;
         t.tm_isdst = 0;
@@ -129,12 +121,9 @@ static void clock_init_default(void)
     }
 }
 
-/* ================================================================== */
-/*  Init                                                               */
-/* ================================================================== */
 esp_err_t system_sync_init(void)
 {
-    if (g_system_events) return ESP_OK;   /* already initialised */
+    if (g_system_events) return ESP_OK;
 
     g_system_events = xEventGroupCreate();
     g_spi_mutex     = xSemaphoreCreateMutex();
@@ -149,11 +138,11 @@ esp_err_t system_sync_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    /* Hand the shared objects to Member 1's module */
+    /* provide access control with the shared SPI mutex and event queue */
     access_control_set_spi_mutex(g_spi_mutex);
     access_control_set_event_queue(g_access_queue);
 
-    /* Evacuation pushbutton: active-low with internal pull-up */
+    /* the evacuation button is active-low and uses the internal pull-up */
     gpio_config_t btn = {
         .pin_bit_mask = 1ULL << EVAC_BUTTON_PIN,
         .mode         = GPIO_MODE_INPUT,
@@ -169,24 +158,20 @@ esp_err_t system_sync_init(void)
     return ESP_OK;
 }
 
-/* ================================================================== */
-/*  System monitor task: evacuation button + evacuation fan-out +      */
-/*  intrusion detection                                                */
-/* ================================================================== */
 static void check_intrusion(bool seen[3], TickType_t last[3])
 {
     bool intruder = false;
 
-    if (!is_access_permitted()) {                   /* building is CLOSED */
+    if (!is_access_permitted()) {                   /* intrusion checks run outside permitted hours */
         for (int room = 1; room <= 2; room++) {
             if (!lighting_get_motion(room)) continue;
             intruder = true;
             TickType_t now = xTaskGetTickCount();
             if (!seen[room] ||
-                (now - last[room]) >= pdMS_TO_TICKS(INTRUSION_LOG_INTERVAL_MS)) {
+                (now - last[room]) >= pdMS_TO_TICKS(INTRUSION_LOG_INTERVAL_MS)) { //50ms
                 seen[room] = true;
                 last[room] = now;
-                schedule_check_intrusion(true);   /* Member 4's alert; it posts SYSLOG_INTRUSION */
+                schedule_check_intrusion(true);   /* updtae intursion event bit queues an intrusion event for storage */
             }
         }
     }
@@ -321,14 +306,14 @@ static void vTaskSystemMonitor(void *pvParameters)
     ESP_LOGI(TAG, "system monitor running");
 
     for (;;) {
-        /* 1. Pushbutton: toggle evacuation on a falling edge */
+        /* toggle evacuation on the button's falling edge */
         int btn = gpio_get_level(EVAC_BUTTON_PIN);
         if (btn == 0 && btn_prev == 1) {
             system_evacuation_set(!system_evacuation_active(), "button");
         }
         btn_prev = btn;
 
-        /* 2. Apply evacuation to every module when the event bit changes */
+        /* propagate evacuation state changes */
         bool evac = system_evacuation_active();
         if (evac != evac_applied) {
             if (evac) {
@@ -351,16 +336,13 @@ static void vTaskSystemMonitor(void *pvParameters)
         }
         if (evac_applied) evac_track(&evac_st);
 
-        /* 3. Intrusion detection */
+        /* check for intrusion */
         check_intrusion(seen, last);
 
         vTaskDelay(pdMS_TO_TICKS(MONITOR_PERIOD_MS));
     }
 }
 
-/* ================================================================== */
-/*  Task creation                                                      */
-/* ================================================================== */
 static bool spawn(TaskFunction_t fn, const char *name, uint32_t stack, UBaseType_t prio)
 {
     BaseType_t r = xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, NULL, TASK_CORE);

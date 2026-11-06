@@ -1,17 +1,3 @@
-/*
- * serial_cli.c  --  MEMBER 5: Serial Interface & System Diagnostics
- *
- * What this file does:
- *   1. Reads what you type in the serial terminal (UART0) one key at a time.
- *   2. Splits each line into words and runs the matching command.
- *   3. Protects the commands that change the system behind an admin password.
- *   4. Samples the headcount twice a second to build the analytics numbers.
- *   5. Shows live numbers on an optional 20x4 I2C LCD.
- *
- * Commands:  help  status  roster  logs  analytics  login <pw>  logout
- *            set-schedule <open_h> <close_h>   settime HH:MM
- *            override-lights <1|2|all> <on|off|auto>   open-door <entry|exit>
- */
 #include "serial_cli.h"
 #include "pins.h"
 
@@ -37,9 +23,6 @@
 
 static const char *TAG = "CLI";
 
-/* ------------------------------------------------------------------ */
-/*  Settings                                                           */
-/* ------------------------------------------------------------------ */
 #define CLI_UART          UART_NUM_0     /* the USB serial console        */
 #define CLI_LINE_MAX      64
 #define CLI_MAX_WORDS     5
@@ -52,44 +35,30 @@ static const char *TAG = "CLI";
 #define LCD_ADDR          0x27           /* PCF8574 backpack address        */
 #define LCD_COLS          20
 
-/* ------------------------------------------------------------------ */
-/*  Hooks that OTHER members may add later.                            */
-/*  "weak" means: if the function does not exist yet, its address is   */
-/*  NULL and we print "not available" instead of failing to build.     */
-/* ------------------------------------------------------------------ */
-/* Member 2 should add: room 0 = all, 1, 2.  mode 0 = auto, 1 = on, 2 = off */
+/* Optional hooks for lighting controls. */
+/* Member 2: room 0 = all, 1 or 2; mode 0 = auto, 1 = on, 2 = off. */
 extern void lighting_set_override(int room, int mode) __attribute__((weak));
-/* Member 2 may add: total seconds the lights spent dimmed or off */
+/* Member 2: optional energy-saved duration hook. */
 extern uint32_t lighting_get_energy_saved_s(void) __attribute__((weak));
 
-/* ------------------------------------------------------------------ */
-/*  State                                                              */
-/* ------------------------------------------------------------------ */
 static char s_line[CLI_LINE_MAX];
 static int  s_len = 0;
 
-/* Admin session */
 static int64_t s_admin_until_us  = 0;
 static int64_t s_locked_until_us = 0;
 static int     s_failed_logins   = 0;
 
-/* Analytics, built by sampling the headcount */
 static int    s_last_count = 0;
 static int    s_peak       = 0;
 static time_t s_peak_time  = 0;
 static int    s_entries    = 0;
 static int    s_exits      = 0;
 
-/* LCD */
 static i2c_master_bus_handle_t s_i2c_bus = NULL;
 static i2c_master_dev_handle_t s_lcd     = NULL;
 static bool                    s_lcd_ok  = false;
 
-/* ================================================================== */
-/*  Small helpers                                                      */
-/* ================================================================== */
-/* Wait at least `ms`. The tick here is 10 ms, so pdMS_TO_TICKS(5) would be
- * 0 ticks (no wait at all). Adding +1 tick guarantees a real delay. */
+/* Round up to at least one FreeRTOS tick. */
 static void delay_ms(uint32_t ms)
 {
     vTaskDelay(ms / portTICK_PERIOD_MS + 1);
@@ -100,7 +69,7 @@ static bool is_admin(void)
     return esp_timer_get_time() < s_admin_until_us;
 }
 
-/* Prints the "you are not logged in" message and returns false. */
+/* Require an active admin session. */
 static bool require_admin(void)
 {
     if (is_admin()) return true;
@@ -108,9 +77,7 @@ static bool require_admin(void)
     return false;
 }
 
-/* ================================================================== */
-/*  LCD: HD44780 20x4 behind a PCF8574 I2C expander                    */
-/* ================================================================== */
+/* PCF8574 bit mapping for the HD44780 LCD. */
 /*
  * The PCF8574 has 8 output pins wired to the LCD like this:
  *   bit0 = RS (0 command / 1 data)   bit1 = RW (always 0)
@@ -127,7 +94,7 @@ static void lcd_expander_write(uint8_t b)
     if (s_lcd) i2c_master_transmit(s_lcd, &b, 1, 50);
 }
 
-/* Put 4 bits on D4..D7 and pulse EN high then low so the LCD reads them. */
+/* Write one nibble and pulse EN. */
 static void lcd_write_nibble(uint8_t nibble, uint8_t rs)
 {
     uint8_t base = (uint8_t)((nibble << 4) | LCD_BL | rs);
@@ -141,7 +108,7 @@ static void lcd_send(uint8_t value, uint8_t rs)
     lcd_write_nibble(value & 0x0F, rs);
 }
 
-/* Write one full 20-character row (text is padded with spaces). */
+/* Write one padded LCD row. */
 static void lcd_row(int row, const char *text)
 {
     static const uint8_t row_start[4] = { 0x00, 0x40, 0x14, 0x54 };
@@ -170,8 +137,7 @@ static void lcd_init(void)
         ESP_LOGW(TAG, "I2C bus failed; LCD disabled");
         return;
     }
-    /* Is anything answering at the LCD address? If not, skip the LCD
-     * quietly so a missing screen never breaks the rest of the system. */
+    /* LCD is optional; continue if it is absent. */
     if (i2c_master_probe(s_i2c_bus, LCD_ADDR, 50) != ESP_OK) {
         ESP_LOGW(TAG, "no LCD at 0x%02X; LCD disabled", LCD_ADDR);
         return;
@@ -183,7 +149,7 @@ static void lcd_init(void)
     };
     if (i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_lcd) != ESP_OK) return;
 
-    /* Standard HD44780 "wake up in 4-bit mode" sequence */
+    /* HD44780 4-bit initialization sequence */
     delay_ms(50);
     lcd_write_nibble(0x03, 0); delay_ms(5);
     lcd_write_nibble(0x03, 0); delay_ms(5);
@@ -200,7 +166,7 @@ static void lcd_init(void)
     ESP_LOGI(TAG, "LCD ready at 0x%02X", LCD_ADDR);
 }
 
-/* Redraw the live diagnostics on the screen (called once a second). */
+/* Refresh live LCD diagnostics. */
 static void lcd_refresh(void)
 {
     if (!s_lcd_ok) return;
@@ -236,15 +202,7 @@ static void lcd_refresh(void)
     lcd_row(3, buf);
 }
 
-/* ================================================================== */
-/*  Analytics: sample the headcount and learn from the changes         */
-/* ================================================================== */
-/*
- * Called every 500 ms. If the headcount went up by 2 since the last look,
- * 2 people entered; if it went down, people left. This is approximate
- * (two events inside 500 ms cancel out) but needs no changes to anyone
- * else's code.
- */
+/* Analytics sampling: simultaneous entry and exit events may cancel out. */
 static void sample_stats(void)
 {
     int n = access_control_get_headcount();
@@ -257,9 +215,6 @@ static void sample_stats(void)
     }
 }
 
-/* ================================================================== */
-/*  Commands                                                           */
-/* ================================================================== */
 static void cmd_help(void)
 {
     printf("Commands:\n"
@@ -481,12 +436,9 @@ static void cmd_evacuate(const char *mode)
     if (strcasecmp(mode, "off") == 0) printf("Building reset to EMPTY (headcount 0).\n");
 }
 
-/* ================================================================== */
-/*  The parser                                                         */
-/* ================================================================== */
 void parse_cli_command(char *line)
 {
-    /* Split the line into words, in place (spaces become '\0'). */
+    /* split the command in place */
     char *w[CLI_MAX_WORDS] = { 0 };
     int   n = 0;
     char *save = NULL;
@@ -512,9 +464,6 @@ void parse_cli_command(char *line)
     else printf("Unknown command '%s'. Type help.\n", w[0]);
 }
 
-/* ================================================================== */
-/*  Reading the keyboard one character at a time                       */
-/* ================================================================== */
 static void prompt(void)
 {
     printf("cocis> ");
@@ -539,12 +488,9 @@ static void handle_char(uint8_t ch)
     }
 }
 
-/* ================================================================== */
-/*  Public API                                                         */
-/* ================================================================== */
 esp_err_t serial_cli_init(void)
 {
-    /* The RX buffer must be larger than the 128-byte hardware FIFO. */
+    /* keep the RX buffer larger than the 128-byte hardware FIFO */
     esp_err_t err = uart_driver_install(CLI_UART, 256, 0, 0, NULL, 0);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
 
@@ -564,21 +510,21 @@ void vTaskSerialCLI(void *pvParameters)
     bool evac_prev = false;
 
     for (;;) {
-        /* Wait up to 50 ms for a key, so the loop below still runs often. */
+    /* keep the task responsive while waiting for input */
         uint8_t ch;
         while (uart_read_bytes(CLI_UART, &ch, 1, pdMS_TO_TICKS(50)) == 1) {
             handle_char(ch);
         }
 
         int64_t now = esp_timer_get_time();
-        /* Evacuation alert: react immediately when the global flag changes */
+        /* refresh the alert immediately when evacuation state changes */
         bool evac = system_evacuation_active();
         if (evac != evac_prev) {
             evac_prev = evac;
             printf("\n\n*** EMERGENCY: EVACUATION %s ***\n\n",
                    evac ? "ACTIVE - doors open, lights full, leave the building"
                         : "CLEARED - normal operation resumed");
-            lcd_refresh();                       /* show or remove the alert screen now, not up to 1 s later */
+            lcd_refresh();
             next_lcd_us = now + 1000000;
             prompt();
             if (s_len > 0) { printf("%.*s", (int)s_len, s_line); fflush(stdout); }   /* restore half-typed text */

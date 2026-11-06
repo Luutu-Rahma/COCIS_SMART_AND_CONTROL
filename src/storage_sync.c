@@ -1,7 +1,4 @@
-/*
- * storage_sync.c -- MEMBER 3: queue consumer + locking around Member 4's SD functions.
- * Lock order (see system_sync.h): g_sd_mutex -> g_spi_mutex.
- */
+/* queue consumer and locking for SD access */
 #include "storage_sync.h"
 
 #include <stdio.h>
@@ -38,7 +35,7 @@ static const char *ac_result_name(access_result_t r)
     }
 }
 
-/* Write one line to the SD card with both locks held (SD first, then SPI). */
+/* acquire the SD mutex before the shared SPI mutex */
 static esp_err_t locked_log(const char *type, const char *detail)
 {
     if (!s_sd_ready) return ESP_ERR_INVALID_STATE;
@@ -46,12 +43,12 @@ static esp_err_t locked_log(const char *type, const char *detail)
     xSemaphoreTake(g_sd_mutex, portMAX_DELAY);
     xSemaphoreTake(g_spi_mutex, portMAX_DELAY);
     esp_err_t r = log_event_to_sd(type, detail);
-    xSemaphoreGive(g_spi_mutex);
+    xSemaphoreGive(g_spi_mutex); //release in reverse order 
     xSemaphoreGive(g_sd_mutex);
     return r;
 }
 
-static void store(const char *type, const char *detail)
+static void store(const char *type, const char *detail) //sd crad fail = print to serial monitor (not stored)
 {
     ESP_LOGI(TAG, "[%s] %s", type, detail);
     if (!s_sd_ready) return;

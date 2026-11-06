@@ -6,12 +6,12 @@
 
 static const char *TAG = "LIGHTING_CONTROL";
 
-// PWM
+// PWM duty values
 #define PWM_DUTY_FULL 8191
 #define PWM_DUTY_STANDBY 2457
 #define PWM_DUTY_OFF 0
 
-#define GRACE_PERIOD_MS 30000 // 30 second grace timer
+#define GRACE_PERIOD_MS 30000 // Grace period before dimming.
 
 // Timer 0 and channels 0-1 are reserved for the access-control servos.
 #define LIGHT_LEDC_TIMER LEDC_TIMER_1
@@ -44,7 +44,7 @@ void lighting_control_init(void)
         return;
     }
 
-    // configuring snesors
+    // PIR sensor configuration
     gpio_config_t pir_config = {
         .pin_bit_mask = (1ULL << PIR_ROOM1_PIN) | (1ULL << PIR_ROOM2_PIN),
         .mode = GPIO_MODE_INPUT,
@@ -53,7 +53,7 @@ void lighting_control_init(void)
         .intr_type = GPIO_INTR_DISABLE};
     gpio_config(&pir_config);
 
-    // configuring PWM ledc timer
+    // LEDC timer configuration
     ledc_timer_config_t ledc_timer = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .timer_num = LIGHT_LEDC_TIMER,
@@ -62,7 +62,7 @@ void lighting_control_init(void)
         .clk_cfg = LEDC_AUTO_CLK};
     ledc_timer_config(&ledc_timer);
 
-    // configurig LEDC Channel 2 for room 1
+    // Room 1 LEDC channel
     ledc_channel_config_t room1_channel = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .channel = LIGHT_LEDC_CH_ROOM1,
@@ -73,7 +73,7 @@ void lighting_control_init(void)
         .hpoint = 0};
     ledc_channel_config(&room1_channel);
 
-    // configuring LEDC channel 3 for room 2
+    // Room 2 LEDC channel
     ledc_channel_config_t room2_channel = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .channel = LIGHT_LEDC_CH_ROOM2,

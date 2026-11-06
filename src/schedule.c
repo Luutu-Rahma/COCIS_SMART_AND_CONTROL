@@ -12,7 +12,7 @@
 static int open_hour  = 7;    // building opens at 07:00
 static int close_hour = 22;   // building closes at 22:00
 
-// Trun the red LED and BUZZER on or off
+// Intrusion alert outputs
 static void alert_set(bool on)   
 {
     static bool ready = false;
@@ -26,20 +26,19 @@ static void alert_set(bool on)
 }
 
 
-// Member 3: the hours are read by two tasks and written by the CLI, so every access
-// is guarded by g_config_mutex (it is NULL until system_sync_init() has run).
+// Member 3: shared configuration is protected by g_config_mutex.
 static void cfg_lock(void)   { if (g_config_mutex) xSemaphoreTake(g_config_mutex, portMAX_DELAY); }
 static void cfg_unlock(void) { if (g_config_mutex) xSemaphoreGive(g_config_mutex); }
 
-// Set the clock to a chosen time today (used for demo/testing)
+// Set today's clock time.
 void schedule_set_time(int hour, int minute)
 {
     time_t now;
     time(&now);
     struct tm t;
     localtime_r(&now, &t);
-    t.tm_year = 126;          // years since 1900, so 2026
-    t.tm_mon  = 10;           // months start at 0, so 10 = November
+    t.tm_year = 126;
+    t.tm_mon  = 10;
     t.tm_mday = 1;
     t.tm_hour = hour;
     t.tm_min  = minute;
@@ -49,18 +48,18 @@ void schedule_set_time(int hour, int minute)
     settimeofday(&tv, NULL);
 }
 
-// The admin CLI (Member 5) can call this to change the hours
+// Update opening hours from the admin CLI.
 void schedule_set_hours(int open_h, int close_h)
 {
     cfg_lock();
     open_hour  = open_h;
     close_hour = close_h;
     cfg_unlock();
-    // Member 3: audit trail of the configuration change
+    // Member 3: configuration audit log.
     system_log_post(SYSLOG_CONFIG_CHANGE, "Opening hours set to %02d:00-%02d:00", open_h, close_h);
 }
 
-// Member 3: read the current hours (for the CLI status/menu)
+// Read opening hours for the CLI.
 void schedule_get_hours(int *open_h, int *close_h)
 {
     cfg_lock();
@@ -69,7 +68,7 @@ void schedule_get_hours(int *open_h, int *close_h)
     cfg_unlock();
 }
 
-// Returns true if the current hour is inside the opening hours
+// Check whether the building is open.
 bool is_access_permitted(void)
 {
     int o, c;
@@ -92,15 +91,15 @@ bool is_access_permitted_for_role(user_role_t role)
 }
 
 
-// Called when a PIR sensor reports motion
+// Handle PIR motion reports.
 void schedule_check_intrusion(bool motion_detected)
 {
     if (motion_detected && !is_access_permitted()) {
         printf("INTRUSION ALERT!\n");
         system_log_post(SYSLOG_INTRUSION, "Motion detected while building CLOSED"); 
         log_event_to_sd("INTRUSION_ALERT", "PIR");
-        alert_set(true);     // LED  buzzer on
+        alert_set(true);     // LED and buzzer on
     } else {
-        alert_set(false);    // LED  off
+        alert_set(false);    // LED and buzzer off
     }
 }

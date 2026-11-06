@@ -1,21 +1,4 @@
-/*
- * access_control.c  --  MEMBER 1: Main Entrance & RFID Access Control
- *
- * What this file does:
- *   1. Talks to TWO MFRC522 (RC522) RFID readers over ONE shared SPI bus.
- *   2. Reads the 4-byte UID of a tag, checks it against a whitelist.
- *   3. Opens the correct door servo using PWM (LEDC) for a few seconds.
- *   4. Keeps the live headcount and WHERE each person is (outside / lobby /
- *      room 1 / room 2), using 4 readers: entry, exit, room 1 door, room 2 door.
- *   5. Emits an access_event_t to a queue so Member 4 can log it to the SD card.
- *   6. EVACUATION: remembers who was inside when it started, marks people SAFE
- *      when they tap the exit reader, and EMPTIES the building when it ends.
- *
- * Pin map (matches the Wokwi diagram):
- *   SPI bus (VSPI):  SCK=18  MISO=19  MOSI=23     Shared RST: 15
- *   Chip selects:    ENTRY=5  EXIT=4  ROOM1=GPIO0  ROOM2=GPIO12
- *   Entry servo PWM: 33              Exit servo PWM: 27
- */
+/* RFID access control for both entrances. */
 #include "access_control.h"
 
 #include <string.h>
@@ -30,9 +13,6 @@
 
 static const char *TAG = "ACCESS";
 
-/* ------------------------------------------------------------------ */
-/*  Pins & constants                                                   */
-/* ------------------------------------------------------------------ */
 #define RC522_SPI_HOST   SPI3_HOST      /* VSPI on the ESP32 */
 #define PIN_SPI_SCK      18
 #define PIN_SPI_MISO     19
@@ -52,9 +32,6 @@ static const char *TAG = "ACCESS";
 #define SERVO_ANGLE_CLOSED  0
 #define SERVO_ANGLE_OPEN    90
 
-/* ------------------------------------------------------------------ */
-/*  MFRC522 register map (only what we use)                            */
-/* ------------------------------------------------------------------ */
 #define REG_COMMAND       0x01
 #define REG_COM_IRQ       0x04
 #define REG_DIV_IRQ       0x05
@@ -96,7 +73,6 @@ static SemaphoreHandle_t s_spi_mutex   = NULL;  /* from Member 3 (optional) */
 static QueueHandle_t     s_event_queue = NULL;  /* from Member 3 (optional) */
 static SemaphoreHandle_t s_state_mutex = NULL;  /* OURS: guards state below */
 
-/* --- Whitelist ---------------------------------------------------- */
 typedef struct {
     uint8_t      uid[AC_UID_LEN];
     const char  *name;
@@ -131,7 +107,6 @@ static user_t s_users[] = {
 static int s_headcount = 0;
 static bool s_evacuation = false;
 
-/* --- Doors -------------------------------------------------------- */
 typedef struct {
     bool    open;
     int64_t close_at_us;
@@ -163,17 +138,11 @@ static const char *reader_name(reader_t r)
  */
 static const int s_soft_cs[READER_COUNT] = { -1, -1, PIN_CS_ROOM1, PIN_CS_ROOM2 };
 
-/* ------------------------------------------------------------------ */
-/*  Weak default for Member 4's function                               */
-/* ------------------------------------------------------------------ */
 __attribute__((weak)) bool is_access_permitted(void)
 {
     return true;  /* replaced automatically when schedule.c defines it */
 }
 
-/* ================================================================== */
-/*  LAYER 1: raw SPI register access to the RC522                      */
-/* ================================================================== */
 /*
  * RC522 SPI frame: first byte = address byte, second byte = data.
  *   address byte = (reg << 1) & 0x7E, and bit7 = 1 for a READ.
@@ -247,9 +216,6 @@ static void rc522_read_fifo(reader_t g, uint8_t *buf, uint8_t n)
     memcpy(buf, &rx[1], n);
 }
 
-/* ================================================================== */
-/*  LAYER 2: talking to a card through the RC522                       */
-/* ================================================================== */
 
 /* Ask the RC522's hardware to compute the ISO14443 CRC_A of a buffer. */
 static bool rc522_calc_crc(reader_t g, const uint8_t *data, uint8_t len, uint8_t out[2])
@@ -388,9 +354,6 @@ static void rc522_chip_init(reader_t g)
              (ver == 0x00 || ver == 0xFF) ? "<-- NO RESPONSE, CHECK WIRING!" : "(OK)");
 }
 
-/* ================================================================== */
-/*  LAYER 3: door servos (PWM via LEDC)                                */
-/* ================================================================== */
 /*
  * A hobby servo wants a 50 Hz signal (20 ms period). The pulse WIDTH sets
  * the angle: ~0.5 ms = 0 deg ... ~2.5 ms = 180 deg.
@@ -431,7 +394,7 @@ static void servos_init(void)
     }
 }
 
-/* Non-blocking door logic: open now, remember WHEN to close. */
+/* open the door and schedule its close without blocking */
 void access_control_open_door(gate_t gate, uint32_t hold_ms)
 {
     if (gate >= GATE_COUNT) return;
@@ -466,9 +429,6 @@ static void doors_update(void)
     }
 }
 
-/* ================================================================== */
-/*  LAYER 4: access decision + headcount                               */
-/* ================================================================== */
 static int find_user(const uint8_t uid[AC_UID_LEN])
 {
     for (size_t i = 0; i < NUM_USERS; i++)
@@ -621,7 +581,7 @@ static void handle_scan(reader_t r, const uint8_t uid[AC_UID_LEN])
              uid[0], uid[1], uid[2], uid[3], result_str(ev.result), ev.headcount,
              access_control_loc_str(ev.location));
 
-    /* Hand the event to Member 4's logger (non-blocking: never stall the door) */
+    /* queue the event without blocking door operation */
     if (s_event_queue) {
         if (xQueueSend(s_event_queue, &ev, 0) != pdTRUE) {
             ESP_LOGW(TAG, "event queue full, event dropped");
@@ -629,9 +589,6 @@ static void handle_scan(reader_t r, const uint8_t uid[AC_UID_LEN])
     }
 }
 
-/* ================================================================== */
-/*  Public API                                                         */
-/* ================================================================== */
 void access_control_set_event_queue(QueueHandle_t q)   { s_event_queue = q; }
 void access_control_set_spi_mutex(SemaphoreHandle_t m) { s_spi_mutex = m; }
 
@@ -737,7 +694,7 @@ esp_err_t access_control_init(void)
     s_state_mutex = xSemaphoreCreateMutex();
     if (!s_state_mutex) return ESP_ERR_NO_MEM;
 
-    /* --- Shared SPI bus. Member 4's SD card will reuse this bus. ---- */
+    /* the SD card shares this SPI bus */
     spi_bus_config_t bus = {
         .mosi_io_num     = PIN_SPI_MOSI,
         .miso_io_num     = PIN_SPI_MISO,
@@ -792,7 +749,7 @@ esp_err_t access_control_init(void)
         }
     }
 
-    /* --- Shared hardware RESET line for both readers ---------------- */
+    /* both readers share the reset line */
     gpio_config_t rst = {
         .pin_bit_mask = 1ULL << PIN_RC522_RST,
         .mode         = GPIO_MODE_OUTPUT,

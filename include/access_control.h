@@ -1,15 +1,3 @@
-/*
- * access_control.h  --  MEMBER 1: Main Entrance, Room Doors & RFID Access Control
- *
- * Public interface of the access-control module. Other members only ever
- * need THIS header; they never touch the RC522 / servo details.
- *
- * NEW (evacuation tracking): every person now has a LOCATION (outside / lobby /
- * room 1 / room 2). Four RFID readers feed it: the two main doors plus one reader
- * on each lecture-room door. During an evacuation the module keeps a roster of
- * who was inside when it started and who has reached the exit ("safe"), so
- * rescuers know how many people are missing and where they were last seen.
- */
 #ifndef ACCESS_CONTROL_H
 #define ACCESS_CONTROL_H
 
@@ -21,10 +9,10 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 
-#define AC_UID_LEN   4      /* we support 4-byte MIFARE Classic UIDs   */
+#define AC_UID_LEN   4      /* MIFARE Classic 4-byte UIDs */
 #define AC_NAME_LEN  16
 
-/* The two DOORS that have a servo (unchanged: servo arrays are sized by GATE_COUNT) */
+/* door associated with a scan */
 typedef enum {
     GATE_ENTRY = 0,
     GATE_EXIT  = 1,
@@ -98,15 +86,14 @@ typedef struct {
 /* Init SPI bus (VSPI), the four RC522 readers, both door servos. */
 esp_err_t access_control_init(void);
 
-/* FreeRTOS task body. Member 3 spawns it:
- *   xTaskCreate(vTaskAccessControl, "access", 4096, NULL, 5, NULL);  */
+/* FreeRTOS task body; started by the synchronization module */
 void vTaskAccessControl(void *pvParameters);
 
-/* ---- Hooks wired up by Member 3 (optional: NULL = feature disabled) */
+/* optional synchronization hooks; NULL disables the corresponding feature */
 void access_control_set_event_queue(QueueHandle_t q);    /* xAccessEventQueue */
 void access_control_set_spi_mutex(SemaphoreHandle_t m);  /* xSPIBusMutex      */
 
-/* ---- Read-only state for Member 5's CLI (thread-safe) -------------- */
+/* thread-safe state access for the CLI */
 int  access_control_get_headcount(void);
 /* Copies the names of people currently inside; returns how many. */
 int  access_control_list_inside(char names[][AC_NAME_LEN], int max);
@@ -117,7 +104,7 @@ void access_control_get_evac_summary(evac_summary_t *s);
 /* "OUTSIDE", "LOBBY", "ROOM1", "ROOM2" (no spaces/commas: safe for the CSV log) */
 const char *access_control_loc_str(person_loc_t loc);
 
-/* ---- Admin override (Member 5 CLI: e.g. "open-door entry") --------- */
+/* admin door override */
 void access_control_open_door(gate_t gate, uint32_t hold_ms);
 
 /*
@@ -128,9 +115,7 @@ void access_control_open_door(gate_t gate, uint32_t hold_ms);
  */
 void access_control_set_evacuation(bool active);
 
-/* ---- Provided by Member 4 (schedule.c) ----------------------------- */
-/* Returns true if the building is open right now. A weak default that
- * always returns true lives in access_control.c so you can test alone.  */
+/* schedule hook; a weak default in access_control.c permits standalone tests */
 bool is_access_permitted(void);
 
 #endif /* ACCESS_CONTROL_H */
